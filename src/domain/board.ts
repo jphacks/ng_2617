@@ -10,15 +10,23 @@ export type CardPosition = Readonly<{
   z: number;
 }>;
 
+export type CardShape = Readonly<{
+  lt: [x: number, y: number];
+  rd: [x: number, y: number];
+  /**left topとright downで四角形を定義 */
+}>;
+
 export type Card = Readonly<{
   cardId: string;
-  /** 形状の種類は未確定のため、現時点では文字列で扱う。 */
-  shape: string;
+  cardKind: string; // そのカードが単なるカードなのかアイデアブロックなのか
+  shape: CardShape;
   position: CardPosition;
   color: string;
   editingUser?: User;
   text: string;
-  font: string;
+  reactions: string[];
+  relatedIds: string[]; //アイデアブロックの時に使用.関連するcardIdを格納
+  summary: string; //アイデアブロックの時に使用。アイデアの概要を記入する。
 }>;
 
 export type Board = Readonly<{
