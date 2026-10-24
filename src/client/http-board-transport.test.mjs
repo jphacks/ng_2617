@@ -1,12 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createHttpBoardTransport as httpTransport } from './http-board-transport.ts';
+import { createHttpBoardTransport } from './http-board-transport.ts';
 import { createBoardClient } from './board-client.ts';
 import { createBoardService } from '../server/board-service.ts';
-
-function createHttpBoardTransport(fetcher, factory = () => ({ close() {} })) {
-  return httpTransport(fetcher, factory);
-}
 
 const snapshot = {
   type: 'board.snapshot', revision: 0,
@@ -117,65 +113,4 @@ test('POSTで編集許可・競合拒否・確定・取消を既存クライア�
   await changed;
   assert.equal(client.getSnapshot().board.cards[0].text, 'HTTPで更新');
   client.disconnect();
-});
-
-test('SSEの識別情報・形式を検証し、購読解除後のイベントを無視する', async () => {
-  for (const invalid of [
-    'not json',
-    JSON.stringify({ ...snapshot, board: { ...snapshot.board, boardId: 'other' } }),
-    JSON.stringify({ ...snapshot, type: 'edit.check', clientId: 'other', userId: 'user', cardId: '1', lockId: 'lock', checkId: 'check' }),
-    JSON.stringify({ ...snapshot, type: 'edit.check', clientId: 'client', userId: 'other', cardId: '1', lockId: 'lock', checkId: 'check' }),
-    JSON.stringify({ ...snapshot, type: 'edit.check', clientId: 'client', userId: 'user', cardId: '1', lockId: 'lock' }),
-  ]) {
-    const events = [];
-    const errors = [];
-    let stream;
-    const transport = createHttpBoardTransport(async () => Response.json(snapshot), url => {
-      assert.equal(url, '/api/boards/demo/events?userId=user&clientId=client');
-      stream = { closed: false, close() { this.closed = true; } };
-      return stream;
-    });
-    const stop = transport.subscribe(event => events.push(event), error => errors.push(error));
-    await transport.send(command);
-    stream.onopen();
-    stream.onmessage({ data: JSON.stringify({ ...snapshot, revision: 1 }) });
-    assert.equal(events.length, 2);
-    stream.onmessage({ data: invalid });
-    assert.equal(errors.length, 1);
-    assert.equal(stream.closed, true);
-    stop();
-    stream.onmessage({ data: JSON.stringify(snapshot) });
-    assert.equal(events.length, 2);
-  }
-});
-
-test('SSEの切断は既存クライアントをオフラインにし、接続を閉じる', async () => {
-  let stream;
-  const transport = createHttpBoardTransport(async () => Response.json(snapshot), () => {
-    stream = { closed: false, close() { this.closed = true; } };
-    return stream;
-  });
-  const client = createBoardClient(command, transport);
-  client.connect();
-  for (let i = 0; i < 20 && !stream; i++) await Promise.resolve();
-  assert.ok(stream);
-  stream.onopen();
-  stream.onerror();
-  assert.equal(client.getSnapshot().status, 'offline');
-  assert.equal(stream.closed, true);
-});
-
-test('期限確認のHTTP応答で問い合わせID・ロックIDの取り違えを拒否する', async () => {
-  const request = { ...command, type: 'edit.check.reply', cardId: '1', lockId: 'lock', checkId: 'check', changed: false };
-  for (const mismatch of [{ lockId: 'other' }, { checkId: 'other' }]) {
-    const errors = [];
-    const transport = createHttpBoardTransport(async () => Response.json({
-      ...snapshot, type: 'edit.checked', clientId: 'client', requestId: 'request', cardId: '1',
-      lockId: 'lock', checkId: 'check', outcome: 'released', ...mismatch,
-    }));
-    const stop = transport.subscribe(() => assert.fail('mismatched check reply'), error => errors.push(error));
-    await transport.send(request);
-    assert.equal(errors.length, 1);
-    stop();
-  }
 });

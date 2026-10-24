@@ -1,4 +1,4 @@
-import type { Board } from '../domain/board';
+import type { Board, Card } from '../domain/board';
 
 /**
  * モックAIサービス：ダミーの単語を生成する
@@ -13,7 +13,6 @@ export async function generateWordSuggestions(board: Board): Promise<string[]> {
   ];
   
   // ランダムに3つの単語を選択
-  const existing = new Set(board.cards.map(card => card.text.trim()));
-  const shuffled = dummyWords.filter(word => !existing.has(word)).sort(() => Math.random() - 0.5);
+  const shuffled = [...dummyWords].sort(() => Math.random() - 0.5);
   return shuffled.slice(0, 3);
 }

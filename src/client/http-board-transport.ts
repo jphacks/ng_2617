@@ -28,81 +28,38 @@ function isEvent(value: unknown): value is BoardEvent {
   });
   if (!validCards) return false;
   if (value.type === 'board.snapshot') return true;
-  const nonempty = (v: unknown) => typeof v === 'string' && v.length > 0;
-  if (value.type === 'edit.check' || value.type === 'edit.released') {
-    return [value.userId, value.clientId, value.cardId, value.lockId].every(nonempty) &&
-      (value.type === 'edit.check' ? nonempty(value.checkId) : value.reason === 'timeout');
-  }
   if (![value.clientId, value.requestId, value.cardId].every(v => typeof v === 'string' && v.length > 0)) return false;
   return (value.type === 'edit.granted' && typeof value.lockId === 'string' && value.lockId.length > 0) ||
     (value.type === 'edit.rejected' && typeof value.reason === 'string') ||
-    value.type === 'edit.committed' || value.type === 'edit.cancelled' ||
-    (value.type === 'edit.checked' && [value.lockId, value.checkId].every(nonempty) &&
-      (value.outcome === 'saved' || value.outcome === 'released'));
+    value.type === 'edit.committed' || value.type === 'edit.cancelled';
 }
 
 function matchesCommand(event: BoardEvent, command: BoardCommand): boolean {
   if (event.board.boardId !== command.boardId) return false;
   if (command.type === 'board.get') return event.type === 'board.snapshot';
-  if (!('requestId' in event) || event.clientId !== command.clientId ||
+  if (command.type === 'idle.heartbeat') return event.type === 'board.snapshot';
+  if (event.type === 'board.snapshot' || event.clientId !== command.clientId ||
       event.requestId !== command.requestId || event.cardId !== command.cardId) return false;
   return event.type === 'edit.rejected' ||
     (command.type === 'edit.request' && event.type === 'edit.granted') ||
     (command.type === 'edit.commit' && event.type === 'edit.committed') ||
-    (command.type === 'edit.cancel' && event.type === 'edit.cancelled') ||
-    (command.type === 'edit.check.reply' && event.type === 'edit.checked' &&
-      event.lockId === command.lockId && event.checkId === command.checkId);
+    (command.type === 'edit.cancel' && event.type === 'edit.cancelled');
 }
 
-type EventSourceConnection = Pick<EventSource, 'onmessage' | 'onerror' | 'onopen' | 'close'>;
-type Subscription = {
-  receive: (event: BoardEvent) => void;
-  disconnect: (reason: string) => void;
-  pending: Set<AbortController>;
-  stream?: EventSourceConnection;
-  clearStreamTimeout?: () => void;
-};
-
-/** 通常要求はHTTP、サーバー起点の期限確認・更新通知はSSEで受信する。 */
-export function createHttpBoardTransport(
-  fetcher: typeof fetch = fetch,
-  createEventSource: (url: string) => EventSourceConnection = url => new EventSource(url),
-): BoardTransport {
-  let subscription: Subscription | undefined;
-  function openStream(current: Subscription, command: BoardCommand) {
-    if (subscription !== current || current.stream) return;
-    const query = new URLSearchParams({ userId: command.userId, clientId: command.clientId });
-    const stream = createEventSource(`/api/boards/${encodeURIComponent(command.boardId)}/events?${query}`);
-    current.stream = stream;
-    const fail = (reason: string) => {
-      stream.close();
-      current.clearStreamTimeout?.();
-      if (subscription === current) current.disconnect(reason);
-    };
-    const timeout = setTimeout(() => fail('更新通知に接続できませんでした。再接続してください。'), 10_000);
-    current.clearStreamTimeout = () => clearTimeout(timeout);
-    stream.onopen = () => current.clearStreamTimeout?.();
-    stream.onerror = () => fail('更新通知の接続が切れました。再接続してください。');
-    stream.onmessage = message => {
-      if (subscription !== current) return;
-      try {
-        const event: unknown = JSON.parse(message.data);
-        if (!isEvent(event) || event.board.boardId !== command.boardId ||
-            ('clientId' in event && event.clientId !== command.clientId) ||
-            ('userId' in event && event.userId !== command.userId)) throw new Error('Invalid event');
-        current.receive(event);
-      } catch { fail('更新通知の形式が不正です。再接続してください。'); }
-    };
-  }
+/** HTTPの要求・応答を既存のイベント契約へ変換する。全端末への配信はまだ行わない。 */
+export function createHttpBoardTransport(fetcher: typeof fetch = fetch): BoardTransport {
+  let subscription: {
+    receive: (event: BoardEvent) => void;
+    disconnect: (reason: string) => void;
+    pending: Set<AbortController>;
+  } | undefined;
   return {
     subscribe(receive, disconnect) {
       if (subscription) throw new Error('この通信窓口は既に使用されています。');
-      const current: Subscription = { receive, disconnect, pending: new Set<AbortController>() };
+      const current = { receive, disconnect, pending: new Set<AbortController>() };
       subscription = current;
       return () => {
         current.pending.forEach((controller) => controller.abort());
-        current.stream?.close();
-        current.clearStreamTimeout?.();
         if (subscription === current) subscription = undefined;
       };
     },
@@ -133,10 +90,7 @@ export function createHttpBoardTransport(
         if (!valid) {
           throw new Error('サーバーから受け取ったボードの形式が不正です。');
         }
-        if (subscription === current) {
-          current.receive(event);
-          if (command.type === 'board.get') openStream(current, command);
-        }
+        if (subscription === current) current.receive(event);
       } catch (error) {
         if (subscription === current) {
           current.disconnect(controller.signal.aborted ? '通信がタイムアウトしました。再取得してください。'
