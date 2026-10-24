@@ -31,7 +31,5 @@ export async function POST(
   }
   const { boardId } = await params;
   const result = executeEdit(command, boardId);
-  // executeEditは同期的を想定しているが、idle.heartbeat処理中にAI生成が非同期で行われる可能性がある
-  // 結果は即時返すが、AI生成はバックグラウンドで実行される
   return Response.json(result.body, { status: result.status, headers });
 }

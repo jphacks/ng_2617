@@ -1,8 +1,11 @@
 import 'server-only';
 import { createBoardService } from './board-service';
 
-// 単一プロセス用。再起動・開発中の再読み込みで初期状態に戻る。
-const service = createBoardService([{
+// HTTPとSSEのRoute Handler間で同じ保存領域を使う。プロセス再起動時は初期化される。
+const processStore = globalThis as typeof globalThis & {
+  editLifecycleBoardService?: ReturnType<typeof createBoardService>;
+};
+const service = processStore.editLifecycleBoardService ??= createBoardService([{
   boardId: 'demo',
   cards: [{
     cardId: '1', shape: 'rectangle', position: { x: 250, y: 150, z: 0 },
@@ -10,4 +13,4 @@ const service = createBoardService([{
   }],
 }]);
 
-export const { getBoardSnapshot, executeEdit, requestEdit, commitEdit, cancelEdit } = service;
+export const { getBoardSnapshot, executeEdit, requestEdit, commitEdit, cancelEdit, replyToEditCheck, subscribeBoard } = service;
