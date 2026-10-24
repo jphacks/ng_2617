@@ -11,9 +11,8 @@ export type CardPosition = Readonly<{
 }>;
 
 export type CardShape = Readonly<{
-  lt: [x: number, y: number];
-  rd: [x: number, y: number];
-  /**left topとright downで四角形を定義 */
+  height: number;
+  width: number;
 }>;
 
 export type Card = Readonly<{
