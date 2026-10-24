@@ -1,19 +1,18 @@
 import type { BoardTransport } from './board-client';
-import type { BoardEvent } from '../domain/board-protocol';
+import type { BoardCommand, BoardEvent } from '../domain/board-protocol';
 
-type Snapshot = Extract<BoardEvent, { type: 'board.snapshot' }>;
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /** 受信JSONを、状態管理に渡す前に検証する。 */
-function isSnapshot(value: unknown): value is Snapshot {
-  if (!isRecord(value) || value.type !== 'board.snapshot' ||
+function isEvent(value: unknown): value is BoardEvent {
+  if (!isRecord(value) ||
       !Number.isSafeInteger(value.revision) || (value.revision as number) < 0 ||
       !isRecord(value.board) || typeof value.board.boardId !== 'string' ||
       !Array.isArray(value.board.cards)) return false;
   const ids = new Set<string>();
-  return value.board.cards.every((card: unknown) => {
+  const validCards = value.board.cards.every((card: unknown) => {
     if (!isRecord(card) || typeof card.cardId !== 'string' || !card.cardId ||
         ids.has(card.cardId) || typeof card.shape !== 'string' ||
         typeof card.color !== 'string' || typeof card.text !== 'string' ||
@@ -27,9 +26,26 @@ function isSnapshot(value: unknown): value is Snapshot {
     ids.add(card.cardId);
     return true;
   });
+  if (!validCards) return false;
+  if (value.type === 'board.snapshot') return true;
+  if (![value.clientId, value.requestId, value.cardId].every(v => typeof v === 'string' && v.length > 0)) return false;
+  return (value.type === 'edit.granted' && typeof value.lockId === 'string' && value.lockId.length > 0) ||
+    (value.type === 'edit.rejected' && typeof value.reason === 'string') ||
+    value.type === 'edit.committed' || value.type === 'edit.cancelled';
 }
 
-/** 取得専用のHTTP通信。常時接続や編集要求はまだ実装しない。 */
+function matchesCommand(event: BoardEvent, command: BoardCommand): boolean {
+  if (event.board.boardId !== command.boardId) return false;
+  if (command.type === 'board.get') return event.type === 'board.snapshot';
+  if (event.type === 'board.snapshot' || event.clientId !== command.clientId ||
+      event.requestId !== command.requestId || event.cardId !== command.cardId) return false;
+  return event.type === 'edit.rejected' ||
+    (command.type === 'edit.request' && event.type === 'edit.granted') ||
+    (command.type === 'edit.commit' && event.type === 'edit.committed') ||
+    (command.type === 'edit.cancel' && event.type === 'edit.cancelled');
+}
+
+/** HTTPの要求・応答を既存のイベント契約へ変換する。全端末への配信はまだ行わない。 */
 export function createHttpBoardTransport(fetcher: typeof fetch = fetch): BoardTransport {
   let subscription: {
     receive: (event: BoardEvent) => void;
@@ -49,24 +65,28 @@ export function createHttpBoardTransport(fetcher: typeof fetch = fetch): BoardTr
     async send(command) {
       const current = subscription;
       if (!current) throw new Error('受信を購読してから送信してください。');
-      if (command.type !== 'board.get') {
-        current.disconnect('このサーバーは現在、ボードの取得だけに対応しています。');
-        return;
-      }
       const controller = new AbortController();
       current.pending.add(controller);
       const timeout = setTimeout(() => controller.abort(), 10_000);
       try {
         const response = await fetcher(`/api/boards/${encodeURIComponent(command.boardId)}`, {
-          method: 'GET', cache: 'no-store', signal: controller.signal,
-          headers: { Accept: 'application/json' },
+          method: command.type === 'board.get' ? 'GET' : 'POST',
+          cache: 'no-store', signal: controller.signal,
+          headers: { Accept: 'application/json', ...(command.type !== 'board.get' && { 'Content-Type': 'application/json' }) },
+          ...(command.type !== 'board.get' && { body: JSON.stringify(command) }),
         });
+        const event: unknown = await response.json();
+        const valid = isEvent(event) && matchesCommand(event, command);
+        // ロック競合・権限拒否も正常な編集応答として状態管理へ渡す。
+        if (valid && event.type === 'edit.rejected' && [403, 404, 409].includes(response.status)) {
+          if (subscription === current) current.receive(event);
+          return;
+        }
         if (!response.ok) {
           throw new Error(response.status === 404 ? 'ボードが見つかりません。'
             : `ボードを取得できませんでした（${response.status}）。`);
         }
-        const event: unknown = await response.json();
-        if (!isSnapshot(event) || event.board.boardId !== command.boardId) {
+        if (!valid) {
           throw new Error('サーバーから受け取ったボードの形式が不正です。');
         }
         if (subscription === current) current.receive(event);
