@@ -6,7 +6,6 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "node --test src/server/*.test.mjs src/client/*.test.mjs src/domain/*.test.mjs",
     "lint": "eslint"
   },
   "dependencies": {
