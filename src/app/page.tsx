@@ -1241,15 +1241,6 @@ function Board() {
     [setEdges]
   );
 
-  const deleteArrow = useCallback(
-    (arrowId: string) => {
-      setEdges((currentEdges) =>
-        currentEdges.filter((edge) => edge.id !== arrowId)
-      );
-    },
-    [setEdges]
-  );
-
     const onNodeClick = useCallback(
     (_event: MouseEvent, node: NoteNode) => {
       // 関連カードから付箋を選択している場合
