@@ -187,6 +187,16 @@ type BackendCard = Readonly<{
   summary: string;
 }>;
 
+type ArrowSide = "top" | "right" | "bottom" | "left";
+
+type BackendArrow = Readonly<{
+  arrowId: string;
+  sourceCardId: string;
+  targetCardId: string;
+  sourceSide: ArrowSide | null;
+  targetSide: ArrowSide | null;
+}>;
+
 // 認証・ユーザー識別の接続後に、最後に編集したユーザーを設定する。
 type EditingUser = BackendUser;
 
@@ -690,6 +700,52 @@ function toBackendCard(node: NoteNode, allNodes: NoteNode[], z = 0): BackendCard
   return card;
 }
 
+function getArrowSide(
+  handleId: string | null | undefined,
+  prefix: "source" | "target"
+): ArrowSide | null {
+  if (!handleId?.startsWith(`${prefix}-`)) {
+    return null;
+  }
+
+  const side = handleId.slice(prefix.length + 1);
+
+  switch (side) {
+    case "top":
+    case "right":
+    case "bottom":
+    case "left":
+      return side;
+    default:
+      return null;
+  }
+}
+
+function toBackendArrow(
+  edge: Edge,
+  allNodes: NoteNode[]
+): BackendArrow | null {
+  const sourceNode = allNodes.find(
+    (node) => node.id === edge.source
+  );
+
+  const targetNode = allNodes.find(
+    (node) => node.id === edge.target
+  );
+
+  if (!sourceNode || !targetNode) {
+    return null;
+  }
+
+  return {
+    arrowId: edge.id,
+    sourceCardId: sourceNode.data.cardId,
+    targetCardId: targetNode.data.cardId,
+    sourceSide: getArrowSide(edge.sourceHandle, "source"),
+    targetSide: getArrowSide(edge.targetHandle, "target"),
+  };
+}
+
 const nodeTypes = { note: NoteCard };
 
 const initialNotes: NoteNode[] = [
@@ -769,6 +825,15 @@ function Board() {
   const [nodes, setNodes, onNodesChange] =
     useNodesState<NoteNode>(initialNotes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const backendArrows = useMemo(
+    () =>
+      edges
+        .map((edge) => toBackendArrow(edge, nodes))
+        .filter(
+          (arrow): arrow is BackendArrow => arrow !== null
+        ),
+    [edges, nodes]
+  );
 
   const deleteSelected = useCallback(() => {
     const selectedNodeIds = new Set(
@@ -1156,21 +1221,30 @@ function Board() {
 
   const onConnect = useCallback(
     (connection: Connection) => {
-      setEdges((current) =>
+      setEdges((currentEdges) =>
         addEdge(
           {
             ...connection,
+            id: `arrow-${crypto.randomUUID()}`,
             type: "smoothstep",
             markerEnd: {
               type: MarkerType.ArrowClosed,
-              width: 22,
-              height: 22,
-              color: "#334155",
             },
-            style: { stroke: "#334155", strokeWidth: 2.2 },
+            style: {
+              strokeWidth: 2,
+            },
           },
-          current
+          currentEdges
         )
+      );
+    },
+    [setEdges]
+  );
+
+  const deleteArrow = useCallback(
+    (arrowId: string) => {
+      setEdges((currentEdges) =>
+        currentEdges.filter((edge) => edge.id !== arrowId)
       );
     },
     [setEdges]
@@ -1277,6 +1351,7 @@ function Board() {
         fitView
         fitViewOptions={{ padding: 0.22 }}
         proOptions={{ hideAttribution: true }}
+        deleteKeyCode={["Backspace", "Delete"]}
         defaultEdgeOptions={{
           type: "smoothstep",
           markerEnd: {
