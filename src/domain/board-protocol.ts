@@ -16,7 +16,10 @@ export type BoardCommand = Request & (
   | { type: 'edit.request'; cardId: string }
   | { type: 'edit.commit'; cardId: string; lockId: string; content: CardContent }
   | { type: 'edit.cancel'; cardId: string; lockId: string }
-  | { type: 'idle.heartbeat'; isIdle: boolean } // アイドル状態をサーバーに送信
+  | ({ type: 'edit.check.reply'; cardId: string; lockId: string; checkId: string } & (
+    | { changed: true; content: CardContent }
+    | { changed: false }
+  ))
 );
 
 /**
@@ -30,4 +33,17 @@ export type BoardEvent = Snapshot & (
   | (Reply & { type: 'edit.granted'; lockId: string })
   | (Reply & { type: 'edit.rejected'; reason: string })
   | (Reply & { type: 'edit.committed' | 'edit.cancelled' })
+  | (Reply & { type: 'edit.checked'; lockId: string; checkId: string; outcome: 'saved' | 'released' })
+  | { type: 'edit.check'; userId: string; clientId: string; cardId: string; lockId: string; checkId: string }
+  | { type: 'edit.released'; userId: string; clientId: string; cardId: string; lockId: string; reason: 'timeout' }
 );
+
+export function cardContent(card: Card): CardContent {
+  return { shape: card.shape, position: { ...card.position }, color: card.color, text: card.text, font: card.font };
+}
+
+/** JSONのキー順序に依存せず、最後に保存した5属性と下書きを比較する。 */
+export function sameCardContent(a: CardContent, b: CardContent): boolean {
+  return a.shape === b.shape && a.color === b.color && a.text === b.text && a.font === b.font &&
+    a.position.x === b.position.x && a.position.y === b.position.y && a.position.z === b.position.z;
+}

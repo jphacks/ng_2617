@@ -198,3 +198,140 @@ test('自分の応答が新しいスナップショットより遅れた場合�
   assert.equal(client.getSnapshot().revision, 2);
   assert.equal(client.getSnapshot().edit.phase, 'idle');
 });
+
+function checkEvent(extra = {}) {
+  return {
+    type: 'edit.check', board: locked, revision: 1, userId: identity.userId,
+    clientId: identity.clientId, cardId: card.cardId, lockId: 'lock-1', checkId: 'check-1', ...extra,
+  };
+}
+
+test('期限確認で未保存の下書きを返し、途中保存の応答で入力中の内容を上書きしない', () => {
+  const { client, grant, emit, reply, commands } = setup();
+  grant();
+  client.updateDraft({ text: '途中保存', position: { x: 10, y: 20, z: 0 } });
+  emit(checkEvent());
+  const sent = commands.at(-1);
+  assert.equal(sent.type, 'edit.check.reply');
+  assert.equal(sent.changed, true);
+  assert.equal(sent.content.text, '途中保存');
+  assert.equal(sent.checkId, 'check-1');
+  assert.equal(client.getSnapshot().edit.phase, 'editing');
+  const count = commands.length;
+  emit(checkEvent());
+  assert.equal(commands.length, count);
+  client.updateDraft({ text: '応答待ちの間の入力' });
+  const saved = { ...locked, cards: [{ ...locked.cards[0], ...sent.content }] };
+  reply('edit.checked', saved, 2, { lockId: 'lock-1', checkId: 'check-1', outcome: 'saved' });
+  assert.equal(client.getSnapshot().board.cards[0].text, '途中保存');
+  assert.equal(client.getSnapshot().edit.draft.text, '応答待ちの間の入力');
+  emit(checkEvent({ board: saved, revision: 2, checkId: 'check-2' }));
+  assert.equal(commands.at(-1).content.text, '応答待ちの間の入力');
+  assert.equal(client.commitEdit(), true);
+});
+
+test('入力を元に戻した下書きは変更なしと返し、サーバー側解除で編集を終了する', () => {
+  const { client, grant, emit, reply, commands } = setup();
+  grant();
+  client.updateDraft({ text: 'temporary' });
+  client.updateDraft({ text: card.text });
+  emit(checkEvent());
+  assert.equal(commands.at(-1).changed, false);
+  assert.equal('content' in commands.at(-1), false);
+  reply('edit.checked', board, 2, { lockId: 'lock-1', checkId: 'check-1', outcome: 'released' });
+  assert.equal(client.getSnapshot().edit.phase, 'idle');
+  assert.equal(client.getSnapshot().error, null);
+});
+
+test('期限確認には端末・ユーザー・カード・ロックが一致した場合だけ返答する', () => {
+  const { client, grant, emit, commands } = setup();
+  grant();
+  const count = commands.length;
+  for (const mismatch of [{ clientId: 'other' }, { userId: 'other' }, { cardId: 'other' }, { lockId: 'old' }]) {
+    emit(checkEvent(mismatch));
+  }
+  assert.equal(commands.length, count);
+  assert.equal(client.getSnapshot().edit.phase, 'editing');
+});
+
+test('確定・取消の送信中は期限確認に返答せず、通常操作の完了を待つ', () => {
+  for (const operation of ['commitEdit', 'cancelEdit']) {
+    const { client, grant, emit, commands } = setup();
+    grant();
+    client[operation]();
+    const count = commands.length;
+    emit(checkEvent());
+    assert.equal(commands.length, count);
+    assert.equal(client.getSnapshot().edit.phase, operation === 'commitEdit' ? 'saving' : 'cancelling');
+  }
+});
+
+test('別カードの新しい通知が先着しても有効な期限確認には最新の保存内容を基準に返答する', () => {
+  const { client, grant, emit, snapshot, commands } = setup();
+  grant();
+  client.updateDraft({ text: 'new draft' });
+  snapshot({ ...locked, cards: [...locked.cards, { ...card, cardId: 'other' }] }, 3);
+  emit(checkEvent());
+  assert.equal(commands.at(-1).type, 'edit.check.reply');
+  assert.equal(commands.at(-1).content.text, 'new draft');
+  assert.equal(client.getSnapshot().revision, 3);
+  assert.equal(client.getSnapshot().board.cards.length, 2);
+});
+
+test('古い問い合わせへの拒否と通常取消後の途中保存応答でロックを復活させない', () => {
+  const { client, grant, emit, reply, commands } = setup();
+  grant();
+  client.updateDraft({ text: 'draft' });
+  emit(checkEvent());
+  const checkReply = commands.at(-1);
+  reply('edit.rejected', locked, 1, { reason: '期限確認終了' });
+  assert.equal(client.getSnapshot().edit.phase, 'editing');
+  client.cancelEdit();
+  reply('edit.cancelled', board, 3);
+  emit({
+    ...checkReply, type: 'edit.checked', outcome: 'saved', revision: 2,
+    board: { ...locked, cards: [{ ...locked.cards[0], text: 'draft' }] },
+  });
+  assert.equal(client.getSnapshot().status, 'ready');
+  assert.equal(client.getSnapshot().edit.phase, 'idle');
+  assert.equal(client.getSnapshot().revision, 3);
+});
+
+test('SSEで処理済みの許可にHTTP応答が遅れても、編集中の下書きを維持する', () => {
+  const { client, grant, reply, snapshot } = setup();
+  grant();
+  client.updateDraft({ text: 'draft' });
+  snapshot(locked, 2);
+  reply('edit.granted', locked, 1, { lockId: 'lock-1' });
+  assert.equal(client.getSnapshot().status, 'ready');
+  assert.equal(client.getSnapshot().edit.draft.text, 'draft');
+});
+
+test('無応答によるロック解除通知で下書きを閉じ、再取得では再起動後のrevisionも受け入れる', () => {
+  const { client, grant, emit, snapshot } = setup();
+  grant();
+  emit({
+    type: 'edit.released', board, revision: 2, userId: identity.userId,
+    clientId: identity.clientId, cardId: card.cardId, lockId: 'lock-1', reason: 'timeout',
+  });
+  assert.equal(client.getSnapshot().edit.phase, 'idle');
+  assert.match(client.getSnapshot().error, /解除/);
+  client.disconnect();
+  client.connect();
+  snapshot(board, 0);
+  assert.equal(client.getSnapshot().status, 'ready');
+  assert.equal(client.getSnapshot().revision, 0);
+});
+
+test('通常確定・取消の完了より先に解除後のスナップショットが届いても成功を誤認しない', () => {
+  for (const operation of ['commitEdit', 'cancelEdit']) {
+    const { client, grant, snapshot, reply } = setup();
+    grant();
+    client[operation]();
+    snapshot(board, 2);
+    assert.equal(client.getSnapshot().edit.phase, operation === 'commitEdit' ? 'saving' : 'cancelling');
+    reply(operation === 'commitEdit' ? 'edit.committed' : 'edit.cancelled', board, 2);
+    assert.equal(client.getSnapshot().edit.phase, 'idle');
+    assert.equal(client.getSnapshot().error, null);
+  }
+});

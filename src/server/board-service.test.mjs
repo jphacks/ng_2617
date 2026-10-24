@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createBoardService } from './board-service.ts';
+import { fakeClock } from '../test/fake-clock.mjs';
 
 const card = { cardId: 'card', shape: 'rectangle', position: { x: 0, y: 0, z: 0 }, color: '#fff', text: 'original', font: 'sans-serif' };
 const board = { boardId: 'board', cards: [card] };
@@ -52,11 +53,14 @@ test('取消は内容を変更せずロックを解除する', () => {
   assert.equal(service.requestEdit({ ...command, clientId: 'other' }).status, 200);
 });
 
-test('期限切れの編集権では確定できず、別の端末が取得し直せる', () => {
-  let time = 0;
-  const service = setup({ now: () => time, lockTtlMs: 100 });
+test('期限到達後も問い合わせ中はロックを保持し、無応答の解除後は別端末が取得できる', async () => {
+  const clock = fakeClock();
+  const service = setup({ now: clock.now, schedule: clock.schedule, lockTtlMs: 100, replyTimeoutMs: 10 });
   service.requestEdit(command);
-  time = 100;
+  await clock.advance(100);
+  assert.equal(service.getBoardSnapshot('board').revision, 1);
+  assert.equal(service.requestEdit({ ...command, clientId: 'other' }).status, 409);
+  await clock.advance(10);
   assert.equal(service.commitEdit(commit).status, 403);
   assert.deepEqual(service.getBoardSnapshot('board').board, board);
   assert.equal(service.getBoardSnapshot('board').revision, 2);
