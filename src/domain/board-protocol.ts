@@ -16,6 +16,7 @@ export type BoardCommand = Request & (
   | { type: 'edit.request'; cardId: string }
   | { type: 'edit.commit'; cardId: string; lockId: string; content: CardContent }
   | { type: 'edit.cancel'; cardId: string; lockId: string }
+  | { type: 'idle.heartbeat'; isIdle: boolean } // アイドル状態をサーバーに送信
 );
 
 /**

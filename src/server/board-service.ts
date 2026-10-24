@@ -1,11 +1,13 @@
 import type { Board, Card } from '../domain/board';
 import type { BoardCommand, BoardEvent, CardContent } from '../domain/board-protocol';
+import { generateWordSuggestions } from './ai-service';
 
-type EditCommand = Exclude<BoardCommand, { type: 'board.get' }>;
+type EditCommand = Exclude<BoardCommand, { type: 'board.get' } | { type: 'idle.heartbeat' }>;
 type Snapshot = Extract<BoardEvent, { type: 'board.snapshot' }>;
 export type EditResult = { status: number; body: BoardEvent | { error: string } };
 type Lock = { userId: string; clientId: string; lockId: string; expiresAt: number };
 type Entry = { board: Board; revision: number; locks: Map<string, Lock> };
+type ClientIdleState = { isIdle: boolean; lastUpdated: number };
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -33,15 +35,18 @@ function editCommand(value: unknown): value is EditCommand {
 /** 単一プロセスの同期処理。検証〜更新の間にawaitを入れず、競合確認と確定を一体にする。 */
 export function createBoardService(
   initialBoards: readonly Board[],
-  options: { now?: () => number; createLockId?: () => string; lockTtlMs?: number } = {},
+  options: { now?: () => number; createLockId?: () => string; lockTtlMs?: number; idleThresholdMs?: number } = {},
 ) {
   const now = options.now ?? Date.now;
   const createLockId = options.createLockId ?? (() => crypto.randomUUID());
   const lockTtlMs = options.lockTtlMs ?? 5 * 60_000;
+  const idleThresholdMs = options.idleThresholdMs ?? 10 * 60_000; // デフォルト10分
   if (!Number.isFinite(lockTtlMs) || lockTtlMs <= 0) throw new Error('Invalid lock TTL');
+  if (!Number.isFinite(idleThresholdMs) || idleThresholdMs <= 0) throw new Error('Invalid idle threshold');
   const boards = new Map<string, Entry>(initialBoards.map(board => [board.boardId, {
     board: structuredClone(board), revision: 0, locks: new Map(),
   }]));
+  const clientIdleStates = new Map<string, ClientIdleState>(); // clientId -> idle state
 
   function replace(entry: Entry, card: Card) {
     entry.board = { ...entry.board, cards: entry.board.cards.map(current => current.cardId === card.cardId ? card : current) };
@@ -63,7 +68,73 @@ export function createBoardService(
   function snapshot(entry: Entry): Snapshot {
     return { type: 'board.snapshot', board: structuredClone(entry.board), revision: entry.revision };
   }
+
+  function updateClientIdleState(clientId: string, isIdle: boolean) {
+    clientIdleStates.set(clientId, { isIdle, lastUpdated: now() });
+  }
+
+  function areAllClientsIdle(): boolean {
+    if (clientIdleStates.size === 0) return false;
+    const time = now();
+    for (const [clientId, state] of clientIdleStates) {
+      // 最終更新からしきい値時間経過していないクライアントは考慮しない
+      if (time - state.lastUpdated > idleThresholdMs) {
+        clientIdleStates.delete(clientId);
+        continue;
+      }
+      if (!state.isIdle) return false;
+    }
+    return clientIdleStates.size > 0;
+  }
+
+  function hasLockedCards(entry: Entry): boolean {
+    return entry.locks.size > 0;
+  }
+
+  function shouldTriggerAiGeneration(entry: Entry): boolean {
+    // 編集中のカードがある場合はAI生成をスキップ
+    if (hasLockedCards(entry)) return false;
+    // 全員がアイドル状態かチェック
+    return areAllClientsIdle();
+  }
+
+  async function triggerAiGeneration(entry: Entry) {
+    const suggestions = await generateWordSuggestions(entry.board);
+    // 各単語を新しいカードとして追加
+    for (const word of suggestions) {
+      const newCard: Card = {
+        cardId: crypto.randomUUID(),
+        shape: 'rectangle',
+        position: { 
+          x: 250 + Math.random() * 200, 
+          y: 150 + Math.random() * 200, 
+          z: entry.board.cards.length 
+        },
+        color: '#f0f0f0',
+        text: word,
+        font: 'sans-serif',
+      };
+      entry.board = { ...entry.board, cards: [...entry.board.cards, newCard] };
+      entry.revision += 1;
+    }
+  }
   function executeEdit(input: unknown, expectedBoardId?: string): EditResult {
+    // idle.heartbeatコマンドの処理
+    if (record(input) && input.type === 'idle.heartbeat' && id(input.boardId) && id(input.userId) && id(input.clientId) && id(input.requestId)) {
+      const command = structuredClone(input) as { boardId: string; clientId: string; isIdle: boolean };
+      updateClientIdleState(command.clientId, command.isIdle);
+      
+      const entry = boards.get(command.boardId);
+      if (!entry) return { status: 404, body: { error: 'ボードが見つかりません。' } };
+      
+      // 全員がアイドル状態かつ編集中のカードがない場合、AI生成をトリガー
+      if (shouldTriggerAiGeneration(entry)) {
+        triggerAiGeneration(entry).catch(err => console.error('AI generation failed:', err));
+      }
+      
+      return { status: 200, body: { ...snapshot(entry), type: 'board.snapshot' } };
+    }
+
     if (!editCommand(input) || (expectedBoardId !== undefined && input.boardId !== expectedBoardId)) {
       return { status: 400, body: { error: '編集要求の形式またはボードIDが不正です。' } };
     }
@@ -97,6 +168,12 @@ export function createBoardService(
       : withoutEditor(card);
     replace(entry, nextCard);
     entry.locks.delete(card.cardId);
+    
+    // ロック解除後、全員がアイドル状態ならAI生成をトリガー
+    if (shouldTriggerAiGeneration(entry)) {
+      triggerAiGeneration(entry).catch(err => console.error('AI generation failed:', err));
+    }
+    
     return {
       status: 200,
       body: { ...snapshot(entry), ...reply, type: command.type === 'edit.commit' ? 'edit.committed' : 'edit.cancelled' },

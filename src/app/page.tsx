@@ -1,27 +1,38 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { ReactFlow, Background, Controls } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { createBoardClient, type BoardClientState } from '@/client/board-client';
+import { createBoardClient, type BoardClientState, type BoardClient } from '@/client/board-client';
 import { createHttpBoardTransport } from '@/client/http-board-transport';
+import { useIdleHeartbeat } from '@/hooks/useIdleHeartbeat';
 
 export default function Home() {
   const [state, setState] = useState<BoardClientState | null>(null);
   const [request, setRequest] = useState(0);
+  const clientRef = useRef<BoardClient | null>(null);
 
   useEffect(() => {
     // ブラウザで生成する。今回は取得専用で、ユーザー認証はまだ行わない。
     const client = createBoardClient({
       boardId: 'demo', userId: 'demo-user', clientId: crypto.randomUUID(),
     }, createHttpBoardTransport());
+    clientRef.current = client;
     const unsubscribe = client.subscribe(() => setState(client.getSnapshot()));
     client.connect();
     return () => {
       unsubscribe();
       client.disconnect();
+      clientRef.current = null;
     };
   }, [request]);
+
+  // アイドル状態を定期的にサーバーに送信
+  useIdleHeartbeat({
+    client: clientRef.current,
+    timeoutSeconds: 30, // 30秒間操作がなければアイドルとみなす
+    heartbeatIntervalSeconds: 60, // 60秒ごとにハートビートを送信
+  });
 
   const nodes = state?.board?.cards.map((card) => ({
     id: card.cardId,
