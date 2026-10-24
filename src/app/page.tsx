@@ -169,6 +169,9 @@ type NoteData = {
   availableNotes?: { id: string; title: string; color: string }[];
   onRemoveRelated?: (targetId: string, sourceId: string) => void;
   onReaction?: (id: string, emoji: string) => void;
+  onRemoveReaction?: (id: string, index: number) => void;
+  onStartRelatedSelection?: (targetId: string) => void;
+  isSelectingRelated?: boolean;
 };
 
 type NoteNode = Node<NoteData, "note">;
@@ -204,18 +207,14 @@ function getAutoFontSize(
 
 function NoteCard({ id, data, selected }: NodeProps<NoteNode>) {
   const [showReactions, setShowReactions] = useState(false);
-  const [showRelatedOptions, setShowRelatedOptions] = useState(false);
 
   const relatedNotes = data.relatedIds;
-  const availableNotes = (data.availableNotes ?? []).filter(
-    (note) => note.id !== id && !relatedNotes.includes(note.id)
-  );
 
   return (
     <div
       style={{
         width: data.kind === "normal" ? 210 : 290,
-        minHeight: data.kind === "normal" ? 210 : 210,
+        minHeight: 210,
         background: data.color,
         border: selected ? "3px solid #4778e6" : "1px solid #e5dfc9",
         borderRadius: 5,
@@ -285,7 +284,13 @@ function NoteCard({ id, data, selected }: NodeProps<NoteNode>) {
             border: 0,
             outline: 0,
             padding: data.title.trim()
-              ? `${Math.max(12, 82 - Math.min(data.title.split("\n").length, 6) * getAutoFontSize(data.title, 19, 12, 6) * 0.75)}px 12px 12px`
+              ? `${Math.max(
+                  12,
+                  82 -
+                    Math.min(data.title.split("\n").length, 6) *
+                      getAutoFontSize(data.title, 19, 12, 6) *
+                      0.75
+                )}px 12px 12px`
               : 12,
             background: "transparent",
             color: "#292929",
@@ -327,12 +332,15 @@ function NoteCard({ id, data, selected }: NodeProps<NoteNode>) {
                   padding: "9px 2px",
                 }}
               >
-                付箋を選択して追加
+                ボード上の付箋を選択して追加
               </div>
             )}
 
             {relatedNotes.map((relatedId) => {
-              const related = data.availableNotes?.find((note) => note.id === relatedId);
+              const related = data.availableNotes?.find(
+                (note) => note.id === relatedId
+              );
+
               return (
                 <RelatedChip
                   key={relatedId}
@@ -347,60 +355,29 @@ function NoteCard({ id, data, selected }: NodeProps<NoteNode>) {
 
             <button
               className="nodrag"
-              onClick={() => setShowRelatedOptions((current) => !current)}
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                data.onStartRelatedSelection?.(id);
+              }}
               style={{
                 width: "100%",
                 marginTop: 5,
                 padding: "7px 8px",
                 border: "1px solid #ded8c8",
                 borderRadius: 5,
-                background: "#ffffffb8",
+                background: data.isSelectingRelated
+                  ? "#e8efff"
+                  : "#ffffffb8",
                 color: "#514b3f",
                 fontSize: 11,
                 cursor: "pointer",
               }}
             >
-              {showRelatedOptions ? "選択を閉じる" : "+ 付箋を選択"}
+              {data.isSelectingRelated
+                ? "ボード上の付箋をクリック"
+                : "+ ボードから付箋を選択"}
             </button>
-
-            {showRelatedOptions && (
-              <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 4 }}>
-                {availableNotes.length === 0 ? (
-                  <div style={{ fontSize: 11, color: "#817967", padding: 5 }}>
-                    追加できる付箋がありません
-                  </div>
-                ) : (
-                  availableNotes.map((note) => (
-                    <button
-                      key={note.id}
-                      className="nodrag"
-                      onClick={() => data.onDropRelated?.(id, note.id)}
-                      title="この付箋を関連付ける"
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 7,
-                        width: "100%",
-                        padding: "7px 8px",
-                        border: "1px solid #e8e2d5",
-                        borderRadius: 5,
-                        background: "#fff",
-                        color: "#333",
-                        textAlign: "left",
-                        fontSize: 11,
-                        cursor: "pointer",
-                      }}
-                    >
-                      <span style={{ width: 9, height: 9, flexShrink: 0, borderRadius: 2, background: note.color, border: "1px solid #00000020" }} />
-                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {note.title.trim() || "無題の付箋"}
-                      </span>
-                      <span style={{ marginLeft: "auto", color: "#888" }}>＋</span>
-                    </button>
-                  ))
-                )}
-              </div>
-            )}
           </div>
 
           <div
@@ -444,6 +421,7 @@ function NoteCard({ id, data, selected }: NodeProps<NoteNode>) {
 
       {data.reactions.length > 0 && (
         <div
+          className="nodrag"
           style={{
             display: "flex",
             gap: 4,
@@ -455,13 +433,37 @@ function NoteCard({ id, data, selected }: NodeProps<NoteNode>) {
             <span
               key={`${emoji}-${index}`}
               style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 2,
                 borderRadius: 20,
                 background: "#ffffffaa",
-                padding: "3px 7px",
+                padding: "2px 4px 2px 7px",
                 fontSize: 13,
               }}
             >
               {emoji}
+              <button
+                className="nodrag"
+                type="button"
+                title="このリアクションを削除"
+                aria-label={`${emoji}のリアクションを削除`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  data.onRemoveReaction?.(id, index);
+                }}
+                style={{
+                  border: 0,
+                  background: "transparent",
+                  color: "#666",
+                  cursor: "pointer",
+                  padding: "0 2px",
+                  lineHeight: 1,
+                  fontSize: 13,
+                }}
+              >
+                ×
+              </button>
             </span>
           ))}
         </div>
@@ -477,7 +479,11 @@ function NoteCard({ id, data, selected }: NodeProps<NoteNode>) {
         }}
       >
         <button
-          onClick={() => setShowReactions(!showReactions)}
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            setShowReactions(!showReactions);
+          }}
           title="リアクション"
           style={smallButton}
         >
@@ -502,7 +508,9 @@ function NoteCard({ id, data, selected }: NodeProps<NoteNode>) {
             {EMOJIS.map((emoji) => (
               <button
                 key={emoji}
-                onClick={() => {
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
                   data.onReaction?.(id, emoji);
                   setShowReactions(false);
                 }}
@@ -521,7 +529,9 @@ function NoteCard({ id, data, selected }: NodeProps<NoteNode>) {
       </div>
 
       {/* 四辺すべてに接続ハンドルを配置。終点側には矢印を表示 */}
-      {([Position.Top, Position.Right, Position.Bottom, Position.Left] as const).map((position) => (
+      {(
+        [Position.Top, Position.Right, Position.Bottom, Position.Left] as const
+      ).map((position) => (
         <Fragment key={position}>
           <Handle
             type="source"
@@ -705,6 +715,7 @@ function Board() {
   const [seconds, setSeconds] = useState(300);
   const [timerRunning, setTimerRunning] = useState(false);
   const [firstArrowNode, setFirstArrowNode] = useState<string | null>(null);
+  const [relatedSelectionTarget, setRelatedSelectionTarget] =useState<string | null>(null);
   const [nodes, setNodes, onNodesChange] =
     useNodesState<NoteNode>(initialNotes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -807,6 +818,27 @@ function Board() {
     [setNodes]
   );
 
+  const removeReaction = useCallback(
+    (id: string, index: number) => {
+      setNodes((current) =>
+        current.map((node) =>
+          node.id === id
+            ? {
+                ...node,
+                data: {
+                  ...node.data,
+                  reactions: node.data.reactions.filter(
+                    (_, reactionIndex) => reactionIndex !== index
+                  ),
+                },
+              }
+            : node
+        )
+      );
+    },
+    [setNodes]
+  );
+
   const wiredNodes = useMemo(
     () =>
       nodes.map((node) => ({
@@ -825,9 +857,12 @@ function Board() {
             })),
           onRemoveRelated: removeRelated,
           onReaction: addReaction,
+          onRemoveReaction: removeReaction, // ← ここに追加
+          onStartRelatedSelection: setRelatedSelectionTarget,
+          isSelectingRelated: relatedSelectionTarget === node.id,
         },
       })),
-    [nodes, changeNote, addRelated, removeRelated, addReaction]
+    [nodes, changeNote, addRelated, removeRelated, addReaction, removeReaction,relatedSelectionTarget]
   );
 
   const addNoteAt = useCallback(
@@ -891,16 +926,35 @@ function Board() {
     [setEdges]
   );
 
-  const onNodeClick = useCallback(
+    const onNodeClick = useCallback(
     (_event: MouseEvent, node: NoteNode) => {
-      if (tool === "arrow") {
-        // 矢印は付箋の青い始点ハンドルから赤い終点ハンドルへドラッグして作成する。
+      // 関連カードから付箋を選択している場合
+      if (relatedSelectionTarget !== null) {
+        // 選択元の関連カード自身をクリックした場合は選択解除
+        if (node.id === relatedSelectionTarget) {
+          setRelatedSelectionTarget(null);
+          return;
+        }
+
+        // 通常付箋だけを関連付ける
+        if (node.data.kind === "normal") {
+          addRelated(relatedSelectionTarget, node.id);
+          setRelatedSelectionTarget(null);
+        }
+
         return;
-      } else if (tool === "reaction") {
+      }
+
+      if (tool === "arrow") {
+        // 矢印はハンドルからドラッグして作成
+        return;
+      }
+
+      if (tool === "reaction") {
         addReaction(node.id, "👍");
       }
     },
-    [tool, firstArrowNode, setEdges, addReaction]
+    [relatedSelectionTarget, addRelated, tool, addReaction]
   );
 
   const onPaneClick = useCallback(
@@ -961,7 +1015,7 @@ function Board() {
         onConnect={onConnect}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
-        nodesDraggable={tool !== "arrow" && tool !== "reaction" && tool !== "range"}
+        nodesDraggable={relatedSelectionTarget === null && tool !== "arrow" && tool !== "reaction" && tool !== "range"}
         nodesConnectable={tool === "arrow" || tool === "select"}
         elementsSelectable={tool === "select" || tool === "range"}
         nodesFocusable={tool === "select" || tool === "range"}
@@ -1276,8 +1330,12 @@ function Board() {
         )}
       </div>
 
+      
       {/* 操作ガイド */}
-      {(tool === "arrow" || tool === "note" || tool === "reaction") && (
+      {(tool === "arrow" ||
+        tool === "note" ||
+        tool === "reaction" ||
+        relatedSelectionTarget !== null) && (
         <div
           style={{
             position: "absolute",
@@ -1295,13 +1353,20 @@ function Board() {
             pointerEvents: "none",
           }}
         >
-          {tool === "note" &&
+          {relatedSelectionTarget !== null &&
+            "関連付け先を選択中：ボード上の通常付箋をクリック"}
+
+          {relatedSelectionTarget === null && tool === "note" &&
             "キャンバスをクリックして付箋を配置"}
-          {tool === "arrow" && "青い点（始点）から赤い点（終点）へドラッグして矢印を作成"}
-          {tool === "reaction" &&
+
+          {relatedSelectionTarget === null && tool === "arrow" &&
+            "青い点（始点）から赤い点（終点）へドラッグして矢印を作成"}
+
+          {relatedSelectionTarget === null && tool === "reaction" &&
             "リアクションを付けたい付箋をクリック"}
         </div>
       )}
+
 
       {/* 右下：AIボタンのみ */}
       <button
