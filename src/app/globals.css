@@ -5,13 +5,6 @@
   --foreground: #171717;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #0a0a0a;
@@ -23,4 +16,46 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* --- AIカード出現時のアニメーション定義 --- */
+
+/* low: 台風・ストーム（風に煽られて吹き飛ばされてくるような動き） */
+@keyframes stormDrop {
+  0% {
+    transform: translate(-120px, -80px) rotate(-15deg);
+    opacity: 0;
+  }
+  60% {
+    transform: translate(10px, 5deg) rotate(5deg);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(0, 0) rotate(0deg);
+    opacity: 1;
+  }
+}
+
+/* high: 補給物資（上空からパラシュートでドスンと投下されるような動き） */
+@keyframes supplyDrop {
+  0% {
+    transform: translateY(-150px) scale(0.4);
+    opacity: 0;
+  }
+  70% {
+    transform: translateY(12px) scale(1.05);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+
+.animate-storm {
+  animation: stormDrop 0.7s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.animate-supply {
+  animation: supplyDrop 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
