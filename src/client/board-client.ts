@@ -167,6 +167,9 @@ export function createBoardClient(
     },
     connect,
     disconnect: () => offline(null),
+    sendCommand(command: BoardCommand) {
+      send(command);
+    },
     requestEdit(cardId: string): boolean {
       if (state.status !== 'ready' || state.edit.phase !== 'idle') return false;
       const card = state.board?.cards.find((item) => item.cardId === cardId);
