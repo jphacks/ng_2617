@@ -741,7 +741,16 @@ const initialNotes: NoteNode[] = [
 ];
 
 function Board() {
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, flowToScreenPosition } = useReactFlow();
+  const boardRef = useRef<HTMLDivElement>(null);
+
+  // 案内対象のAI付箋ID
+  const [guidedNodeIds, setGuidedNodeIds] = useState<string[]>([]);
+
+  // 画面端に表示する矢印の位置・角度
+  const [offscreenArrows, setOffscreenArrows] = useState<
+    { id: string; x: number; y: number; angle: number }[]
+  >([]);
   const [tool, setTool] = useState<"select" | "range" | "note" | "arrow" | "reaction">(
     "select"
   );
@@ -750,6 +759,9 @@ function Board() {
   const [showNoteOptions, setShowNoteOptions] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showAIMessage, setShowAIMessage] = useState(false);
+  const [aiLevel, setAiLevel] = useState<"low" | "mid" | "high">("mid");
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generatedNodeIds, setGeneratedNodeIds] = useState<string[]>([]);
   const [seconds, setSeconds] = useState(300);
   const [timerRunning, setTimerRunning] = useState(false);
   const [firstArrowNode, setFirstArrowNode] = useState<string | null>(null);
@@ -942,6 +954,206 @@ function Board() {
     ]
   );
 
+  const generateDummyWords = useCallback(() => {
+    const selectedNotes = nodes.filter(
+      (node) => node.selected && node.data.kind === "normal"
+    );
+
+    // 選択した付箋がなければ、ボード上の通常付箋を使用
+    const sourceNotes =
+      selectedNotes.length > 0
+        ? selectedNotes
+        : nodes.filter((node) => node.data.kind === "normal");
+
+    const sourceWords = sourceNotes
+      .map((node) => node.data.title.trim())
+      .filter(Boolean);
+
+    if (sourceWords.length === 0) {
+      window.alert("元になる付箋を1つ以上入力してください。");
+      return;
+    }
+
+    const dummyWords: Record<"low" | "mid" | "high", string[]> = {
+      low: [
+        "銀河", "砂漠", "振り子", "深海", "鉱石",
+        "惑星", "望遠鏡", "氷河", "化石", "気圧",
+      ],
+      mid: [
+        "快適さ", "インテリア", "音楽", "サービス", "雰囲気",
+        "利用者", "デザイン", "価格", "体験", "利便性",
+      ],
+      high: [
+        "課題", "改善案", "利用者の声", "原因", "解決策",
+        "具体例", "関連要素", "共通点", "メリット", "工夫",
+      ],
+    };
+
+    // 同じ生成結果が続きにくいように候補をシャッフル
+    const shuffled = [...dummyWords[aiLevel]].sort(
+      () => Math.random() - 0.5
+    );
+
+    const words = shuffled.slice(0, 1);
+    const centerX =
+      sourceNotes.reduce((sum, node) => sum + node.position.x, 0) /
+      sourceNotes.length;
+    const centerY =
+      sourceNotes.reduce((sum, node) => sum + node.position.y, 0) /
+      sourceNotes.length;
+
+    const newNodes: NoteNode[] = words.map((word, index) => {
+      const id = `note-ai-${crypto.randomUUID()}`;
+
+      return {
+        id,
+        type: "note",
+        dragHandle: ".drag-handle",
+        position: {
+          x: centerX + 280,
+          y: centerY + (index - 1) * 230,
+        },
+        data: {
+          cardId: createCardId(),
+          kind: "normal",
+          title: word,
+          summary: `関連性：${
+            aiLevel === "low"
+              ? "低"
+              : aiLevel === "mid"
+                ? "中"
+                : "高"
+          }\n元の単語：${sourceWords.slice(0, 3).join("、")}`,
+          color: COLORS[(index + 1) % COLORS.length].value,
+          relatedIds: [],
+          reactions: [],
+        },
+
+      };
+    });
+
+    setIsGenerating(true);
+    setNodes((current) => [...current, ...newNodes]);
+
+    // 今回生成した付箋を、画面外案内の対象にする
+    setGuidedNodeIds((current) => [
+      ...current,
+      ...newNodes.map((node) => node.id),
+    ]);
+
+    setGeneratedNodeIds(newNodes.map((node) => node.id));
+    setShowAIMessage(false);
+
+    // 演出状態を一定時間後に解除
+    window.setTimeout(() => {
+      setGeneratedNodeIds([]);
+      setIsGenerating(false);
+    }, 900);
+  }, [nodes, aiLevel, setNodes]);
+
+  
+  useEffect(() => {
+    const updateArrows = () => {
+      const board = boardRef.current;
+      if (!board) return;
+
+      const rect = board.getBoundingClientRect();
+      const padding = 38;
+      const arrows: {
+        id: string;
+        x: number;
+        y: number;
+        angle: number;
+      }[] = [];
+
+      const visibleIds: string[] = [];
+
+      for (const id of guidedNodeIds) {
+        const node = nodes.find((item) => item.id === id);
+        if (!node) continue;
+
+        const width =
+          node.measured?.width ??
+          (node.data.kind === "normal" ? 210 : 290);
+        const height = node.measured?.height ?? 210;
+
+        // 付箋の四隅を画面座標に変換する。
+        const topLeft = flowToScreenPosition(node.position);
+        const bottomRight = flowToScreenPosition({
+          x: node.position.x + width,
+          y: node.position.y + height,
+        });
+
+        const left = topLeft.x - rect.left;
+        const top = topLeft.y - rect.top;
+        const right = bottomRight.x - rect.left;
+        const bottom = bottomRight.y - rect.top;
+
+        // 付箋全体が画面内に入ったら案内を終了する。
+        const isVisible =
+          left >= 0 &&
+          top >= 0 &&
+          right <= rect.width &&
+          bottom <= rect.height;
+
+        if (isVisible) {
+          visibleIds.push(id);
+          continue;
+        }
+
+        // 付箋の中心がある方向を求める。
+        const x = (left + right) / 2;
+        const y = (top + bottom) / 2;
+        const dx = x - rect.width / 2;
+        const dy = y - rect.height / 2;
+
+        if (dx === 0 && dy === 0) continue;
+
+        // 画面端の少し内側に矢印を配置する。
+        const scale = Math.min(
+          (rect.width / 2 - padding) / Math.max(Math.abs(dx), 1e-6),
+          (rect.height / 2 - padding) / Math.max(Math.abs(dy), 1e-6)
+        );
+
+        arrows.push({
+          id,
+          x: rect.width / 2 + dx * scale,
+          y: rect.height / 2 + dy * scale,
+          angle: (Math.atan2(dy, dx) * 180) / Math.PI,
+        });
+      }
+
+      setOffscreenArrows(arrows);
+
+      // 表示範囲に入った付箋は案内対象から外す。
+      setGuidedNodeIds((current) => {
+        const next = current.filter(
+          (id) =>
+            !visibleIds.includes(id) &&
+            nodes.some((node) => node.id === id)
+        );
+
+        // 配列の内容が変わっていなければ、更新しない
+        if (
+          current.length === next.length &&
+          current.every((id, index) => id === next[index])
+        ) {
+          return current;
+        }
+
+        return next;
+      });
+    };
+
+    updateArrows();
+
+    // ズーム・移動に合わせて矢印を更新する。
+    const intervalId = window.setInterval(updateArrows, 100);
+
+    return () => window.clearInterval(intervalId);
+  }, [guidedNodeIds, nodes, flowToScreenPosition]);
+
+
   const onConnect = useCallback(
     (connection: Connection) => {
       setEdges((current) =>
@@ -1017,6 +1229,7 @@ function Board() {
 
   return (
     <div
+      ref={boardRef}
       style={{
         height: "100vh",
         width: "100vw",
@@ -1078,6 +1291,47 @@ function Board() {
         <Background variant={BackgroundVariant.Lines} color="#dce2eb" gap={30} size={1} />
         <Controls position="bottom-left" showInteractive={false} />
       </ReactFlow>
+
+      {/* 画面外にあるAI付箋への案内矢印 */}
+      {offscreenArrows.map((arrow) => (
+        <div
+          key={arrow.id}
+          title="この方向にAI生成付箋があります"
+          style={{
+            position: "absolute",
+            zIndex: 15,
+            left: arrow.x,
+            top: arrow.y,
+            transform: `translate(-50%, -50%) rotate(${arrow.angle}deg)`,
+            width: 42,
+            height: 42,
+            borderRadius: "50%",
+            background: "#2563eb",
+            color: "#fff",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            boxShadow: "0 3px 12px #00000030",
+            pointerEvents: "none",
+          }}
+        >
+          <svg
+            width="24"
+            height="24"
+            viewBox="0 0 24 24"
+            fill="none"
+            aria-hidden="true"
+          >
+            <path
+              d="M5 12H19M12 5L19 12L12 19"
+              stroke="white"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </div>
+      ))}
 
       {/* 左ツールバー */}
       <div
@@ -1408,7 +1662,7 @@ function Board() {
 
       {/* 右下：AIボタンのみ */}
       <button
-        onClick={() => setShowAIMessage(!showAIMessage)}
+        onClick={() => setShowAIMessage((current) => !current)}
         style={{
           position: "absolute",
           zIndex: 10,
@@ -1436,20 +1690,106 @@ function Board() {
         <div
           style={{
             position: "absolute",
-            zIndex: 10,
+            zIndex: 30,
             right: 22,
-            bottom: 78,
+            bottom: 82,
+            width: 270,
+            padding: 16,
             background: "#fff",
-            border: "1px solid #eee",
-            borderRadius: 10,
-            padding: 14,
-            width: 240,
-            boxShadow: "0 4px 20px #00000010",
+            border: "1px solid #e5e7eb",
+            borderRadius: 12,
+            boxShadow: "0 8px 28px #00000018",
+            color: "#333",
             fontSize: 12,
-            color: "#666",
           }}
         >
-          AIによるアイデア支援は、これから実装します。
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 12,
+            }}
+          >
+            <strong style={{ fontSize: 14 }}>関連語を生成</strong>
+            <button
+              type="button"
+              onClick={() => setShowAIMessage(false)}
+              style={smallButton}
+              aria-label="閉じる"
+            >
+              <X size={16} />
+            </button>
+          </div>
+
+          <div style={{ color: "#777", marginBottom: 10 }}>
+            関連性の度合い
+          </div>
+
+          {(
+            [
+              ["low", "低", "元の単語から遠い"],
+              ["mid", "中", "同じジャンルの関連語"],
+              ["high", "高", "強く関連する単語"],
+            ] as const
+          ).map(([value, label, description]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setAiLevel(value)}
+              style={{
+                display: "block",
+                width: "100%",
+                padding: "10px",
+                marginBottom: 6,
+                textAlign: "left",
+                borderRadius: 8,
+                border:
+                  aiLevel === value
+                    ? "1px solid #6b82c5"
+                    : "1px solid #e5e7eb",
+                background: aiLevel === value ? "#eef2ff" : "#fff",
+                cursor: "pointer",
+              }}
+            >
+              <div style={{ fontWeight: 700, marginBottom: 3 }}>
+                {label}
+              </div>
+              <div style={{ fontSize: 11, color: "#777" }}>
+                {description}
+              </div>
+            </button>
+          ))}
+
+          <button
+            type="button"
+            disabled={isGenerating}
+            onClick={generateDummyWords}
+            style={{
+              width: "100%",
+              marginTop: 8,
+              padding: 11,
+              border: 0,
+              borderRadius: 8,
+              background: isGenerating ? "#888" : "#252525",
+              color: "#fff",
+              cursor: isGenerating ? "wait" : "pointer",
+              fontWeight: 600,
+            }}
+          >
+            {isGenerating ? "生成中..." : "単語を生成"}
+          </button>
+
+          <div
+            style={{
+              marginTop: 9,
+              color: "#999",
+              fontSize: 10,
+              lineHeight: 1.5,
+            }}
+          >
+            現在はダミーデータを使用しています。
+          </div>
         </div>
       )}
 
