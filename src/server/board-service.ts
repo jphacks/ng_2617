@@ -1,12 +1,12 @@
 import type { Board, Card } from '../domain/board';
-import type { BoardCommand, BoardEvent, CardContent } from '../domain/board-protocol';
+import type { BoardCommand, BoardEvent, CardContent, BoardPhase, GameState, GameCard } from '../domain/board-protocol';
 import { generateWordSuggestions } from './ai-service';
 
-type EditCommand = Exclude<BoardCommand, { type: 'board.get' } | { type: 'idle.heartbeat' }>;
+type EditCommand = Exclude<BoardCommand, { type: 'board.get' } | { type: 'idle.heartbeat' } | { type: 'phase.transition' } | { type: 'game.flip' }>;
 type Snapshot = Extract<BoardEvent, { type: 'board.snapshot' }>;
 export type EditResult = { status: number; body: BoardEvent | { error: string } };
 type Lock = { userId: string; clientId: string; lockId: string; expiresAt: number };
-type Entry = { board: Board; revision: number; locks: Map<string, Lock> };
+type Entry = { board: Board; revision: number; locks: Map<string, Lock>; phase: BoardPhase; gameState: GameState | null };
 type ClientIdleState = { isIdle: boolean; lastUpdated: number };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -44,8 +44,8 @@ export function createBoardService(
   if (!Number.isFinite(lockTtlMs) || lockTtlMs <= 0) throw new Error('Invalid lock TTL');
   if (!Number.isFinite(idleThresholdMs) || idleThresholdMs <= 0) throw new Error('Invalid idle threshold');
   const boards = new Map<string, Entry>(initialBoards.map(board => [board.boardId, {
-    board: structuredClone(board), revision: 0, locks: new Map(),
-  }]));
+    board: structuredClone(board), revision: 0, locks: new Map(), phase: 'word-generation' as BoardPhase, gameState: null,
+  }] as [string, Entry][]));
   const clientIdleStates = new Map<string, ClientIdleState>(); // clientId -> idle state
 
   function replace(entry: Entry, card: Card) {
@@ -66,7 +66,44 @@ export function createBoardService(
     }
   }
   function snapshot(entry: Entry): Snapshot {
-    return { type: 'board.snapshot', board: structuredClone(entry.board), revision: entry.revision };
+    return { type: 'board.snapshot', board: structuredClone(entry.board), revision: entry.revision, phase: entry.phase, gameState: entry.gameState ? structuredClone(entry.gameState) : null };
+  }
+
+  function initializeGame(entry: Entry) {
+    // ボード上のカードから単語を抽出
+    const words = entry.board.cards.map(card => card.text).filter(text => text.trim());
+    
+    // ペアを作成（神経衰劣用）
+    const pairedWords = [...words, ...words];
+    // シャッフル
+    for (let i = pairedWords.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [pairedWords[i], pairedWords[j]] = [pairedWords[j], pairedWords[i]];
+    }
+
+    // カード配置（グリッド状）
+    const cards: GameCard[] = pairedWords.map((word, index) => ({
+      cardId: `game-${crypto.randomUUID()}`,
+      word,
+      isFaceUp: false,
+      isMatched: false,
+      position: {
+        x: 100 + (index % 4) * 180,
+        y: 100 + Math.floor(index / 4) * 120,
+      },
+    }));
+
+    // 接続中のユーザーを取得（簡易実装：clientIdleStatesから）
+    const players = Array.from(clientIdleStates.keys());
+    
+    entry.gameState = {
+      cards,
+      currentPlayerIndex: 0,
+      players: players.length > 0 ? players : ['player-1'],
+      flippedCards: [],
+      isProcessing: false,
+    };
+    entry.revision += 1;
   }
 
   function updateClientIdleState(clientId: string, isIdle: boolean) {
@@ -130,6 +167,98 @@ export function createBoardService(
       // 全員がアイドル状態かつ編集中のカードがない場合、AI生成をトリガー
       if (shouldTriggerAiGeneration(entry)) {
         triggerAiGeneration(entry).catch(err => console.error('AI generation failed:', err));
+      }
+      
+      return { status: 200, body: { ...snapshot(entry), type: 'board.snapshot' } };
+    }
+
+    // phase.transitionコマンドの処理
+    if (record(input) && input.type === 'phase.transition' && id(input.boardId) && id(input.userId) && id(input.clientId) && id(input.requestId)) {
+      const command = structuredClone(input) as { boardId: string; phase: BoardPhase };
+      const entry = boards.get(command.boardId);
+      if (!entry) return { status: 404, body: { error: 'ボードが見つかりません。' } };
+      
+      // フェーズを更新
+      entry.phase = command.phase;
+      
+      // 単語出し → アイデア出しへの遷移時にゲームを初期化
+      if (command.phase === 'idea-generation' && !entry.gameState) {
+        initializeGame(entry);
+      }
+      
+      return { status: 200, body: { ...snapshot(entry), type: 'board.snapshot' } };
+    }
+
+    // game.flipコマンドの処理
+    if (record(input) && input.type === 'game.flip' && id(input.boardId) && id(input.userId) && id(input.clientId) && id(input.requestId)) {
+      const command = structuredClone(input) as { boardId: string; cardId: string };
+      const entry = boards.get(command.boardId);
+      if (!entry) return { status: 404, body: { error: 'ボードが見つかりません。' } };
+      if (!entry.gameState) return { status: 400, body: { error: 'ゲームが開始されていません。' } };
+      
+      const gameState = entry.gameState;
+      
+      // 処理中なら無視
+      if (gameState.isProcessing) {
+        return { status: 200, body: { ...snapshot(entry), type: 'board.snapshot' } };
+      }
+      
+      // 既にめくられているか、マッチ済みなら無視
+      const card = gameState.cards.find(c => c.cardId === command.cardId);
+      if (!card || card.isFaceUp || card.isMatched) {
+        return { status: 200, body: { ...snapshot(entry), type: 'board.snapshot' } };
+      }
+      
+      // カードをめくる
+      const updatedCards = gameState.cards.map(c => 
+        c.cardId === command.cardId ? { ...c, isFaceUp: true } : c
+      );
+      const flippedCards = [...gameState.flippedCards, command.cardId];
+      
+      // 2枚めくったらマッチング判定
+      if (flippedCards.length === 2) {
+        const processingState = { ...gameState, isProcessing: true, cards: updatedCards, flippedCards };
+        entry.gameState = processingState;
+        entry.revision += 1;
+        
+        // 1秒後に判定（非同期）
+        setTimeout(() => {
+          const card1 = updatedCards.find(c => c.cardId === flippedCards[0])!;
+          const card2 = updatedCards.find(c => c.cardId === flippedCards[1])!;
+          
+          let nextState;
+          if (card1.word === card2.word) {
+            // マッチした
+            nextState = {
+              ...processingState,
+              cards: processingState.cards.map(c => 
+                (c.cardId === flippedCards[0] || c.cardId === flippedCards[1]) 
+                  ? { ...c, isMatched: true } 
+                  : c
+              ),
+              flippedCards: [],
+              isProcessing: false,
+            };
+          } else {
+            // マッチしなかった - 裏返す
+            nextState = {
+              ...processingState,
+              cards: processingState.cards.map(c => 
+                (c.cardId === flippedCards[0] || c.cardId === flippedCards[1]) 
+                  ? { ...c, isFaceUp: false } 
+                  : c
+              ),
+              flippedCards: [],
+              currentPlayerIndex: (processingState.currentPlayerIndex + 1) % processingState.players.length,
+              isProcessing: false,
+            };
+          }
+          entry.gameState = nextState;
+          entry.revision += 1;
+        }, 1000);
+      } else {
+        entry.gameState = { ...gameState, cards: updatedCards, flippedCards };
+        entry.revision += 1;
       }
       
       return { status: 200, body: { ...snapshot(entry), type: 'board.snapshot' } };

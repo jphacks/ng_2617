@@ -1,6 +1,6 @@
 import type { Board } from '../domain/board';
 import type {
-  BoardCommand, BoardEvent, CardContent, ClientIdentity,
+  BoardCommand, BoardEvent, CardContent, ClientIdentity, BoardPhase, GameState,
 } from '../domain/board-protocol';
 
 /** 実装側は受信値を検証してから通知する。接続を失ったらonDisconnectを呼ぶ。 */
@@ -29,6 +29,8 @@ export type BoardClientState = Readonly<{
   status: 'offline' | 'loading' | 'ready';
   board: Board | null;
   revision: number;
+  phase: BoardPhase;
+  gameState: GameState | null;
   edit: EditState;
   error: string | null;
 }>;
@@ -41,7 +43,7 @@ export function createBoardClient(
 ) {
   let state: BoardClientState = {
     identity: { ...identity }, status: 'offline', board: null,
-    revision: -1, edit: { phase: 'idle' }, error: null,
+    revision: -1, phase: 'word-generation', gameState: null, edit: { phase: 'idle' }, error: null,
   };
   const listeners = new Set<() => void>();
   let unsubscribe: (() => void) | undefined;
@@ -96,6 +98,19 @@ export function createBoardClient(
     const board = structuredClone(event.board);
     let edit = state.edit;
     let error = state.error;
+    let phase = state.phase;
+    let gameState = state.gameState;
+    
+    // フェーズ更新
+    if (event.type === 'board.snapshot' && event.phase) {
+      phase = event.phase;
+    }
+    
+    // ゲーム状態更新
+    if (event.type === 'board.snapshot' && event.gameState) {
+      gameState = event.gameState;
+    }
+    
     const matches = event.type !== 'board.snapshot' &&
       event.clientId === state.identity.clientId && edit.phase !== 'idle' &&
       event.requestId === edit.requestId && event.cardId === edit.cardId;
@@ -134,7 +149,7 @@ export function createBoardClient(
         error = '編集権が失われました。最新の内容から編集を開始してください。';
       }
     }
-    publish({ board, revision: event.revision, status: 'ready', edit, error });
+    publish({ board, revision: event.revision, phase, gameState, status: 'ready', edit, error });
   }
 
   function connect() {

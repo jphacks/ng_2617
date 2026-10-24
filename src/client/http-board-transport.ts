@@ -38,8 +38,10 @@ function matchesCommand(event: BoardEvent, command: BoardCommand): boolean {
   if (event.board.boardId !== command.boardId) return false;
   if (command.type === 'board.get') return event.type === 'board.snapshot';
   if (command.type === 'idle.heartbeat') return event.type === 'board.snapshot';
+  if (command.type === 'phase.transition') return event.type === 'board.snapshot';
+  if (command.type === 'game.flip') return event.type === 'board.snapshot';
   if (event.type === 'board.snapshot' || event.clientId !== command.clientId ||
-      event.requestId !== command.requestId || event.cardId !== command.cardId) return false;
+      event.requestId !== command.requestId || ('cardId' in command && event.cardId !== command.cardId)) return false;
   return event.type === 'edit.rejected' ||
     (command.type === 'edit.request' && event.type === 'edit.granted') ||
     (command.type === 'edit.commit' && event.type === 'edit.committed') ||
