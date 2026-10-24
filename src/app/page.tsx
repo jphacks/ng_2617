@@ -5,7 +5,6 @@ import { ReactFlow, Background, Controls } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { createBoardClient, type BoardClientState, type BoardClient } from '@/client/board-client';
 import { createHttpBoardTransport } from '@/client/http-board-transport';
-import { useIdleHeartbeat } from '@/hooks/useIdleHeartbeat';
 
 export default function Home() {
   const [state, setState] = useState<BoardClientState | null>(null);
@@ -26,14 +25,12 @@ export default function Home() {
     };
   }, [request]);
 
-  useIdleHeartbeat({
-    client: clientRef.current,
-    timeoutSeconds: 30,
-    heartbeatIntervalSeconds: 60,
-  });
+  const edit = state?.edit;
+  const editing = edit && 'draft' in edit ? edit : null;
 
   // --- 【タイマー＆演出担当の統合部分】 ---
-  const nodes = state?.board?.cards.map((card) => {
+  const nodes = state?.board?.cards.map((savedCard) => {
+    const card = editing?.cardId === savedCard.cardId ? { ...savedCard, ...editing.draft } : savedCard;
     // レベル（low / mid / high）に応じたアニメーションとスタイルの切り替え
     let animationClass = '';
     let badgeText = '';
@@ -42,7 +39,7 @@ export default function Home() {
 
     // 仮に card に level プロパティがある、またはサーバーから渡ってくる場合の分岐
     // ※ 実際のプロパティ名（例: card.level や card.relationLevel など）に合わせて調整してください
-    const level = (card as any).level || 'mid'; 
+    const level = 'level' in card ? card.level : 'mid';
 
     if (level === 'low') {
       animationClass = 'animate-storm';
@@ -75,6 +72,7 @@ export default function Home() {
             <div className="font-semibold text-gray-800 text-sm" style={{ fontFamily: card.font }}>
               {card.text}
             </div>
+            {card.editingUser && <small>{editing?.cardId === card.cardId ? '編集中' : '別の端末が編集中'}</small>}
           </div>
         ),
       },
@@ -97,12 +95,28 @@ export default function Home() {
           style={{ border: '1px solid currentColor', borderRadius: 6, padding: '4px 12px', cursor: 'pointer' }}>
           再取得
         </button>
-        <small>取得のみ・編集はまだできません（🌪️アニメーション・タイマー連携中）</small>
+        <small>カードをクリックして編集できます。全員の編集終了から30秒後に候補を追加します。</small>
       </header>
       {state?.error && <p role="alert" style={{ padding: '0 20px', color: '#dc2626' }}>{state.error}</p>}
+      {edit?.phase === 'requesting' && <p role="status" style={{ padding: '0 20px' }}>編集許可を確認中…</p>}
+      {editing && (
+        <form onSubmit={event => { event.preventDefault(); clientRef.current?.commitEdit(); }}
+          style={{ padding: '12px 20px', display: 'flex', alignItems: 'center', gap: 12 }}>
+          <label htmlFor="card-text">カードの内容</label>
+          <textarea id="card-text" value={editing.draft.text} maxLength={100_000}
+            disabled={editing.phase !== 'editing'}
+            onChange={event => clientRef.current?.updateDraft({ text: event.target.value })}
+            style={{ flex: 1, border: '1px solid #aaa', borderRadius: 6, padding: 8 }} />
+          <button type="submit" disabled={editing.phase !== 'editing'}>保存</button>
+          <button type="button" disabled={editing.phase !== 'editing'}
+            onClick={() => clientRef.current?.cancelEdit()}>取消</button>
+          <span role="status">{editing.phase === 'saving' ? '保存中…' : editing.phase === 'cancelling' ? '取消中…' : '編集中'}</span>
+        </form>
+      )}
       <div style={{ flex: 1, minHeight: 0 }}>
         {state?.board && (
           <ReactFlow nodes={nodes} edges={[]} nodesDraggable={false} nodesConnectable={false}
+            onNodeClick={(_event, node) => clientRef.current?.requestEdit(node.id)}
             deleteKeyCode={null} fitView>
             <Background gap={16} size={1} />
             <Controls showInteractive={false} style={{ color: '#171717' }} />
