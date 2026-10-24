@@ -1,4 +1,4 @@
-'use client';
+"use client";
 
 import { useEffect, useState, useRef } from 'react';
 import { ReactFlow, Background, Controls } from '@xyflow/react';
@@ -7,9 +7,8 @@ import { createBoardClient, type BoardClientState, type BoardClient } from '@/cl
 import { createHttpBoardTransport } from '@/client/http-board-transport';
 
 export default function Home() {
-  const [state, setState] = useState<BoardClientState | null>(null);
-  const [request, setRequest] = useState(0);
-  const clientRef = useRef<BoardClient | null>(null);
+  const [roomId, setRoomId] = useState("");
+  const router = useRouter();
 
   useEffect(() => {
     const client = createBoardClient({
@@ -41,19 +40,11 @@ export default function Home() {
     // ※ 実際のプロパティ名（例: card.level や card.relationLevel など）に合わせて調整してください
     const level = 'level' in card ? card.level : 'mid';
 
-    if (level === 'low') {
-      animationClass = 'animate-storm';
-      badgeText = '🌪️ ストーム (台風)';
-      borderColor = '#60a5fa'; // 青系
-      bgColor = '#eff6ff';
-    } else if (level === 'high') {
-      animationClass = 'animate-supply';
-      badgeText = '📦 補給物資';
-      borderColor = '#f59e0b'; // オレンジ系
-      bgColor = '#fffbeb';
-    } else {
-      animationClass = 'transition-all duration-300';
+  const handleKeyDown = (event: React.KeyboardEvent) => {
+    if (event.key === "Enter") {
+      handleJoin();
     }
+  };
 
     return {
       id: card.cardId,
@@ -81,19 +72,63 @@ export default function Home() {
   }) ?? [];
   // ----------------------------------------
 
-  const loading = !state || state.status === 'loading';
+        <div style={{ marginBottom: 24 }}>
+          <label
+            style={{
+              display: "block",
+              fontSize: 13,
+              fontWeight: 600,
+              color: "#222", // ラベルを濃くしました
+              marginBottom: 8,
+            }}
+          >
+            ルームID
+          </label>
+          <input
+            type="text"
+            value={roomId}
+            onChange={(e) => setRoomId(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="例: my-room-123"
+            style={{
+              width: "100%",
+              padding: "12px 16px",
+              border: "1.5px solid #bbb", // 枠線を少し太く・濃くしました
+              borderRadius: 8,
+              fontSize: 15, // 少し文字を大きく
+              color: "#111", // ★入力される文字の色をはっきりとした黒にしました
+              backgroundColor: "#fff", // 背景を白く
+              outline: "none",
+              transition: "border-color 0.2s",
+            }}
+            onFocus={(e) => {
+              e.target.style.borderColor = "#2563eb"; // フォーカス時は青く
+              e.target.style.boxShadow = "0 0 0 3px rgba(37, 99, 235, 0.1)"; // フォーカス時の影
+            }}
+            onBlur={(e) => {
+              e.target.style.borderColor = "#bbb";
+              e.target.style.boxShadow = "none";
+            }}
+          />
+        </div>
 
-  return (
-    <main style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      <header style={{ padding: '12px 20px', display: 'flex', gap: 16, alignItems: 'center' }}>
-        <span role="status">
-          {loading ? 'サーバーから取得中…' : state.status === 'ready'
-            ? `ボード取得済み：${state.board?.boardId}（${nodes.length}枚）`
-            : 'ボードを取得できませんでした'}
-        </span>
-        <button type="button" disabled={loading} onClick={() => setRequest((value) => value + 1)}
-          style={{ border: '1px solid currentColor', borderRadius: 6, padding: '4px 12px', cursor: 'pointer' }}>
-          再取得
+        <button
+          onClick={handleJoin}
+          disabled={!roomId.trim()}
+          style={{
+            width: "100%",
+            padding: "14px",
+            border: 0,
+            borderRadius: 8,
+            background: roomId.trim() ? "#252525" : "#ccc",
+            color: "#fff",
+            fontSize: 15,
+            fontWeight: 600,
+            cursor: roomId.trim() ? "pointer" : "not-allowed",
+            transition: "background 0.2s",
+          }}
+        >
+          ルームに参加
         </button>
         <small>カードをクリックして編集できます。全員の編集終了から30秒後に候補を追加します。</small>
       </header>
@@ -123,6 +158,6 @@ export default function Home() {
           </ReactFlow>
         )}
       </div>
-    </main>
+    </div>
   );
 }

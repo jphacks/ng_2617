@@ -287,6 +287,29 @@ export function createBoardService(
       }
       return () => { entry.subscribers.delete(subscriber); };
     },
+    createBoard(boardId: string): Snapshot {
+      if (boards.has(boardId)) {
+        const entry = boards.get(boardId)!;
+        return snapshot(entry);
+      }
+      const newBoard: Board = {
+        boardId,
+        cards: [{
+          cardId: crypto.randomUUID(),
+          shape: 'rectangle',
+          position: { x: 250, y: 150, z: 0 },
+          color: '#ffffff',
+          text: '💡 ブレインストーミング起点',
+          font: 'sans-serif',
+        }],
+      };
+      boards.set(boardId, {
+        board: newBoard,
+        revision: 0,
+        locks: new Map(),
+      });
+      return snapshot(boards.get(boardId)!);
+    },
     executeEdit,
     requestEdit(command: Extract<EditCommand, { type: 'edit.request' }>) { return executeEdit(command); },
     commitEdit(command: Extract<EditCommand, { type: 'edit.commit' }>) { return executeEdit(command); },
