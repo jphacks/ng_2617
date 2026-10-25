@@ -23,7 +23,7 @@ export function StormAnimation({ onComplete }: StormAnimationProps) {
 
     const finishTimer = window.setTimeout(() => {
       onCompleteRef.current();
-    }, 4000);
+    }, 3000);
 
     return () => {
       window.clearInterval(frameTimer);

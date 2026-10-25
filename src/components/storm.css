@@ -4,15 +4,15 @@
   z-index: 9999;
   overflow: hidden;
   pointer-events: none;
-  animation: storm-cross 4s ease-in-out both;
+  animation: storm-cross 3s ease-in-out both;
 }
 
 .storm-image {
   position: absolute;
-  top: 0;
+  top: -100;
   left: 0;
-  width: 100%;
-  height: 100%;
+  width: 150%;
+  height: 130%;
   object-fit: contain;
   animation: storm-wobble 0.2s linear infinite alternate;
 }
