@@ -19,6 +19,7 @@ import { BoardNotice } from './BoardNotice';
 import type { BoardFile } from '@/domain/board-file';
 import { downloadBoardJson, readBoardFile } from '@/client/board-file';
 import { downloadBoardSvg } from '@/client/board-svg';
+import { StormAnimation } from './StormAnimation';
 
 const nodeTypes = { card: BoardCard };
 const COLORS = ['#FFF0A8', '#FFDCE5', '#D9E9FF', '#DDF5D7', '#EADFFF', '#FFFFFF'];
@@ -71,6 +72,8 @@ function BoardCanvas({ client }: { client: BoardClient }) {
   const editing = edit.phase !== 'idle';
   const generating = state.generation.status === 'running';
   const board = state.board;
+  const [showStorm, setShowStorm] = useState(false);
+  const [stormKey, setStormKey] = useState(0);
   const selection = useMemo(() => {
     const existing = new Set([...(board?.cards.map(card => objectKey(card.cardId)) ?? []),
       ...(board?.arrows.map(arrow => objectKey(arrow.arrowId)) ?? [])]);
@@ -343,7 +346,7 @@ function BoardCanvas({ client }: { client: BoardClient }) {
         <p>関連性の度合い</p>
         {([['low', '低', '元の単語から遠い'], ['mid', '中', '同じジャンルの関連語'], ['high', '高', '強く関連する単語']] as const).map(([value, label, description]) =>
           <button type="button" className="level-option" key={value} aria-pressed={level === value} disabled={generating} onClick={() => setLevel(value)}><b>{label}</b><small>{description}</small></button>)}
-        <button type="button" className="primary generate-button" disabled={!ready || generating} onClick={() => client.execute({ type: 'generation.request', level })}>{generating ? '候補を生成中…' : '単語を生成'}</button>
+        <button type="button" className="primary generate-button" disabled={!ready || generating} onClick={() => { setStormKey((key) => key + 1); setShowStorm(true);client.execute({ type: 'generation.request', level });}}>{generating ? '候補を生成中…' : '単語を生成'}</button>
         <small className="muted">現在はモックの候補語を使用しています。</small>
       </aside>}
       {state.generation.status !== 'idle' && <BoardNotice noticeId={`generation:${state.generation.generationId}:${state.generation.status}`}
@@ -357,6 +360,15 @@ function BoardCanvas({ client }: { client: BoardClient }) {
         <p>関連カードには通常付箋・関連カードの両方を関連付けできます。選択中のEscapeは関連先の選択だけを中止します。</p>
         <p>リアクション・矢印・タイマーは全員に同期します。全員の編集終了から30秒後に候補が追加されます。</p>
       </aside>}
+      {showStorm && (
+        <>
+          <div className="storm-dark-overlay" />
+          <StormAnimation
+            key={stormKey}
+            onComplete={() => setShowStorm(false)}
+          />
+        </>
+      )}
     </main>
   </BoardContext.Provider>;
 }
