@@ -49,7 +49,7 @@ button { color: inherit; }
 .card-drag-handle:active { cursor: grabbing; }
 .grip { width: 34px; height: 4px; border-radius: 5px; background: #00000025; }
 .lock-label { position: absolute; top: -22px; right: 0; white-space: nowrap; font: 10px sans-serif; color: #8b642d; background: #fff8; border-radius: 4px; }
-.card-text { display: block; width: 100%; min-height: 30px; flex: 1; resize: none; border: 0; outline: 0; padding: 12px 14px; background: transparent; color: #292929; text-align: center; line-height: 1.5; overflow: auto; border-radius: 3px; }
+.card-text { display: block; width: 100%; min-height: 30px; flex: 1; resize: none; border: 0; outline: 0; padding: 12px 14px; background: transparent; color: #292929; text-align: center; line-height: 1.5; overflow: auto; border-radius: 3px; -webkit-user-select: text; user-select: text; touch-action: manipulation; }
 .word .card-text { align-content: center; padding-bottom: 26px; }
 .card-text::placeholder { color: #0006; font-size: 13px; }
 .card-text:read-only { cursor: text; }

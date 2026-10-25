@@ -12,10 +12,13 @@
 | CardReaction | `{ reactionId, userId }`。種類ごと・ユーザーごとに1件 |
 | Arrow | arrowId、sourceCardId、targetCardId、sourceAnchor、targetAnchor |
 | Anchor | north / east / south / west |
-| BoardTimer | 初期5分。停止中はremainingMs、実行中はendsAtを保持 |
-| Board | boardId、cards、arrows、timer |
+| BoardTimer | 通常は初期5分、神経衰弱の各段階は10秒。停止中はremainingMs、実行中はendsAtを保持 |
+| Board | boardId、cards、arrows、timer、任意のmatching |
+| MatchingGame | ゲームID、手番ID、段階、担当、全カードのコピー、表示枠・補充待ち・使用済み、選択、入力用カード、中断確認、追加済みID |
+| MatchingDraft | 一時的なuserId・入力元clientId・writerToken・sequence・最終送信済み状態とBlockCard |
 
 本文はどちらもtext。summaryや画面専用の送信用カード型は作らない。リアクションはBlockCard専用で、固定定義REACTIONSを共用する。
+神経衰弱の共有状態は `src/domain/matching.ts`。選択時はコピーのcopyIdで指定し、成果物のrelatedIdsは元カードのCardIdを参照する。成果物へ作者情報を転記せず、ゲーム終了でmatchingを除去する。JSON保存は従来どおり確定済みカードと矢印だけを対象とし、ゲームの途中保存・再開は行わない。
 
 IDは `sameObjectId` で内容を比較する。React FlowやMap/Setには `objectKey` の `card:UUID` / `arrow:UUID` を使う。オブジェクト参照の一致に依存しない。
 
