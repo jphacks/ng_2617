@@ -1,0 +1,38 @@
+.storm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  overflow: hidden;
+  pointer-events: none;
+  background: transparent;
+  animation: storm-cross 2.2s ease-in-out both;
+}
+
+.storm-image {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  object-fit: contain;
+  user-select: none;
+  animation: storm-wobble 0.2s linear infinite alternate;
+}
+
+@keyframes storm-cross {
+  from {
+    translate: -110vw 0;
+  }
+  to {
+    translate: 110vw 0;
+  }
+}
+
+@keyframes storm-wobble {
+  from {
+    rotate: -2deg;
+  }
+  to {
+    rotate: 2deg;
+  }
+}
