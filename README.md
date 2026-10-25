@@ -1,6 +1,6 @@
 # 芽生え
 
-[![IMAGE ALT TEXT HERE](https://jphacks.com/wp-content/uploads/2026/07/IMG_5316.png)](https://www.youtube.com/watch?v=piaNsc6ilBI)
+[![IMAGE ALT TEXT HERE](https://github.com/user-attachments/assets/2818d23d-36ea-49d7-a028-8ee4256c830c)](https://www.youtube.com/watch?v=piaNsc6ilBI)
 
 ## 製品概要
 
