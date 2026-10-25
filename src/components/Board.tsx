@@ -11,6 +11,7 @@ import './matching.css';
 import { createBoardClient, type BoardClient, type BoardClientState } from '@/client/board-client';
 import { createHttpBoardTransport } from '@/client/http-board-transport';
 import { useBoardClient } from '@/client/use-board-client';
+import { useMeasuredNodes } from '@/client/use-measured-nodes';
 import { generatedGuidance } from '@/client/generated-guidance';
 import { CARD_SIZES, createEmptyCard, newArrowId, objectKey, getCard, sameObjectId, type BoardObjectId, type Card, type CardId, type RelationLevel } from '@/domain/board';
 import { validAnchor } from '@/domain/board-validation';
@@ -114,7 +115,7 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
     });
     observer.observe(surface.current); return () => observer.disconnect();
   }, []);
-  const nodes: BoardNode[] = useMemo(() => {
+  const boardNodes: BoardNode[] = useMemo(() => {
     if (!board) return [];
     const provisional = state.pendingCommands.flatMap(command => command.type === 'card.create' && !getCard(board, command.card.cardId) ? [command.card] : []);
     return [...board.cards, ...provisional].map(saved => {
@@ -126,6 +127,7 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
       draggable: ready && !relatedTarget && tool === 'select' && (!saved.editingUser || ownTransform) &&
         (edit.phase === 'idle' || (ownTransform && edit.intent === 'editing')) };
   }); }, [board, state, edit, selection, ready, relatedTarget, tool]);
+  const { nodes, onNodesChange: recordMeasurements } = useMeasuredNodes(boardNodes);
   const edges: Edge[] = board?.arrows.map(arrow => ({ id: objectKey(arrow.arrowId), source: objectKey(arrow.sourceCardId),
     target: objectKey(arrow.targetCardId), sourceHandle: arrow.sourceAnchor, targetHandle: arrow.targetAnchor,
     selected: selection.has(objectKey(arrow.arrowId)), type: 'smoothstep', markerEnd: { type: MarkerType.ArrowClosed, color: '#64748b' },
@@ -217,6 +219,7 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
     window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
   });
   function onNodesChange(changes: NodeChange<BoardNode>[]) {
+    recordMeasurements(changes);
     const selected = changes.filter(change => change.type === 'select');
     if (selected.length) setSelection(previous => {
       const next = new Set(previous); for (const change of selected) if (change.type === 'select') {
