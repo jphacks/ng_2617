@@ -14,6 +14,8 @@ import { generatedGuidance } from '@/client/generated-guidance';
 import { CARD_SIZES, createEmptyCard, newArrowId, objectKey, getCard, sameObjectId, type BoardObjectId, type Card, type CardId, type RelationLevel } from '@/domain/board';
 import { validAnchor } from '@/domain/board-validation';
 import { BoardCard, BoardContext, previewCard, type BoardNode } from './BoardCard';
+import { downloadBoardJson } from '@/client/board-file';
+import { downloadBoardSvg } from '@/client/board-svg';
 
 const nodeTypes = { card: BoardCard };
 const COLORS = ['#FFF0A8', '#FFDCE5', '#D9E9FF', '#DDF5D7', '#EADFFF', '#FFFFFF'];
@@ -260,6 +262,29 @@ function BoardCanvas({ client }: { client: BoardClient }) {
         </div>
         <button className="menu-toggle panel" type="button" aria-label="メニュー" aria-expanded={menu} onClick={() => setMenu(!menu)}>☰</button>
         {menu && <div className="board-menu panel">
+          <button
+            type="button"
+            disabled={!ready || !board || editing || state.pendingCommands.length > 0}
+            onClick={() => {
+              if (!board || editing || state.pendingCommands.length > 0) return;
+              downloadBoardJson(board);
+              setMenu(false);
+            }}
+          >
+            JSONで保存
+          </button>
+          <button
+            type="button"
+            disabled={!ready || !board || editing || state.pendingCommands.length > 0}
+            onClick={() => {
+              if (!board || editing || state.pendingCommands.length > 0) return;
+
+              downloadBoardSvg(board);
+              setMenu(false);
+            }}
+          >
+            SVGで出力
+          </button>
           <button type="button" disabled={!ready} onClick={() => { client.execute({ type: 'board.clear' }); setMenu(false); }}>キャンバスをクリア</button>
           <button type="button" disabled={!ready} onClick={() => { client.execute({ type: 'board.restore-sample' }); setMenu(false); }}>サンプルに戻す</button>
           <button type="button" onClick={() => { setHelp(!help); setMenu(false); }}>操作ガイド</button>
