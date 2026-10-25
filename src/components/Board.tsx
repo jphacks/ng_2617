@@ -1,5 +1,7 @@
 'use client';
 
+import { randomUUID } from '@/domain/uuid';
+
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { ReactFlow, ReactFlowProvider, Background, BackgroundVariant, Controls, MarkerType, SelectionMode, ConnectionMode,
@@ -24,9 +26,9 @@ const TOOLS: readonly [Tool, string, string][] = [
 export function Board({ boardId }: { boardId: string }) {
   const [client, setClient] = useState<BoardClient | null>(null);
   useEffect(() => {
-    let userId = crypto.randomUUID();
+    let userId = randomUUID();
     try { userId = localStorage.getItem('board-user-id') || userId; localStorage.setItem('board-user-id', userId); } catch { /* ストレージが無効でも、この端末で操作できる。 */ }
-    const instance = createBoardClient({ boardId, userId, clientId: crypto.randomUUID() }, createHttpBoardTransport());
+    const instance = createBoardClient({ boardId, userId, clientId: randomUUID() }, createHttpBoardTransport());
     // ブラウザの識別情報はマウント後に読み込む。SSRと初回描画は同じ読み込み表示にする。
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setClient(instance);

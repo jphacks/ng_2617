@@ -1,3 +1,5 @@
+import { randomUUID } from '../domain/uuid.ts';
+
 import type { Board, CardId } from '../domain/board';
 import { getCard, objectKey, sameObjectId } from '../domain/board.ts';
 import type { BoardCommand, BoardEvent, CardChange, CardContent, CardPatch, ClientIdentity, GenerationState, ImmediateOperation } from '../domain/board-protocol';
@@ -24,7 +26,7 @@ export type BoardClientState = Readonly<{
 }>;
 
 /** 1端末の確定状態・許可待ちの仮表示・許可済み下書きを分離する。 */
-export function createBoardClient(identity: ClientIdentity, transport: BoardTransport, createRequestId = () => crypto.randomUUID()) {
+export function createBoardClient(identity: ClientIdentity, transport: BoardTransport, createRequestId = () => randomUUID()) {
   let state: BoardClientState = {
     identity: { ...identity }, status: 'offline', board: null, revision: -1, edit: { phase: 'idle' }, error: null,
     generation: { status: 'idle' }, generationSequence: -1, generatedCardIds: [], pendingCommands: [], serverOffsetMs: 0,
