@@ -7,4 +7,5 @@ const processStore = globalThis as typeof globalThis & { integratedBoardService?
 const service = processStore.integratedBoardService ??= createBoardService([createSample('demo')]);
 // HMR後も旧サービスが残る場合、未対応の読み込みを通常の400として扱わない。
 export const supportsBoardImport = service.supportsBoardImport === true;
+export const supportsMatching = service.supportsMatching === true;
 export const { getBoardSnapshot, ensureBoard, executeCommand, executeEdit, requestEdit, commitEdit, cancelEdit, replyToEditCheck, subscribeBoard } = service;

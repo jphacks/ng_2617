@@ -5,12 +5,14 @@ import { canonical, commandFingerprint } from '../domain/board-protocol.ts';
 import { arrowConnectionKey, validBoard, validCard, validCommand, validId } from '../domain/board-validation.ts';
 import { generateWordSuggestions } from './ai-service.ts';
 import { EDIT_LOCK_TTL_MS, EDIT_REPLY_TIMEOUT_MS, WORD_ADDITION_DELAY_MS, WORD_ADDITION_COUNT, scheduleTimeout, type Schedule } from './edit-lifecycle.ts';
-import { suggestionCards } from './word-addition.ts';
+import { suggestionCards, placeAddedCards } from './word-addition.ts';
 import { onTimerFinished } from './board-timer.ts';
+import { MATCHING_DURATION_MS, MATCHING_FINALIZE_MS } from '../domain/matching.ts';
+import { newMatchingGame, newMatchingDraft, consumeSelected } from './matching-game.ts';
 
 export type EditResult = { status: number; body: BoardEvent | { error: string } };
 export type UpdateKind = 'edit-requested' | 'edit-committed' | 'edit-cancelled' | 'edit-saved' | 'edit-released' |
-  'card-created' | 'objects-deleted' | 'sample-restored' | 'reaction-changed' | 'arrow-created' | 'auto-generated' | 'board-imported' | 'timer';
+  'card-created' | 'objects-deleted' | 'sample-restored' | 'reaction-changed' | 'arrow-created' | 'auto-generated' | 'board-imported' | 'timer' | 'matching';
 export type BoardUpdate = Readonly<{ boardId: string; objectIds: readonly BoardObjectId[]; kind: UpdateKind; revision: number }>;
 type Lock = {
   cardIds: readonly CardId[]; userId: string; clientId: string; lockId: string; expiresAt: number; generation: number;
@@ -22,6 +24,7 @@ type Entry = {
   lastUpdate?: { kind: UpdateKind; at: number }; cardVersion: number; cancelAddition?: () => void;
   generation: GenerationState; generationSequence: number; generating?: string;
   timerVersion: number; cancelTimer?: () => void;
+  cancelMatchingClose?: () => void;
   results: Map<string, { fingerprint: string; result?: EditResult }>;
 };
 type Detail = BoardEvent extends infer E ? E extends BoardEvent ? Omit<E, keyof SnapshotData> : never : never;
@@ -33,9 +36,11 @@ export function createBoardService(initialBoards: readonly Board[], options: {
   generateSuggestions?: (board: Board, level: RelationLevel) => Promise<readonly string[]>;
   onGenerationError?: (error: unknown) => void; onBoardUpdated?: (update: BoardUpdate) => void;
   onTimerFinished?: (board: Board) => void;
+  random?: () => number;
 } = {}) {
   const now = options.now ?? Date.now;
   const schedule = options.schedule ?? scheduleTimeout;
+  const random = options.random ?? Math.random;
   const lockTtlMs = options.lockTtlMs ?? EDIT_LOCK_TTL_MS;
   const replyTimeoutMs = options.replyTimeoutMs ?? EDIT_REPLY_TIMEOUT_MS;
   const additionDelayMs = options.additionDelayMs ?? WORD_ADDITION_DELAY_MS;
@@ -66,7 +71,10 @@ export function createBoardService(initialBoards: readonly Board[], options: {
   }
   function event(entry: Entry, detail: Detail): BoardEvent { return { ...snapshot(entry), ...detail } as BoardEvent; }
   function deliver(entry: Entry, subscriber: Subscriber, value: BoardEvent) {
-    try { subscriber.receive(structuredClone(value)); } catch { entry.subscribers.delete(subscriber); }
+    try { subscriber.receive(structuredClone(value)); } catch {
+      entry.subscribers.delete(subscriber);
+      queueMicrotask(() => { if (!disposed) matchingPresenceChanged(entry); });
+    }
   }
   function notify(entry: Entry, value: BoardEvent, userId?: string) {
     for (const subscriber of entry.subscribers) {
@@ -114,12 +122,12 @@ export function createBoardService(initialBoards: readonly Board[], options: {
     }, lockTtlMs);
   }
   function waitForAddition(entry: Entry) {
-    if (disposed || entry.locks.size || !entry.lastUpdate || entry.lastUpdate.kind === 'board-imported') return;
+    if (disposed || entry.board.matching || entry.locks.size || !entry.lastUpdate || ['board-imported', 'matching'].includes(entry.lastUpdate.kind)) return;
     const version = entry.cardVersion;
     entry.cancelAddition = schedule(() => {
       if (disposed || entry.cardVersion !== version) return;
       entry.cancelAddition = undefined;
-      if (entry.locks.size || isEmpty(entry.board) || (entry.lastUpdate?.kind === 'auto-generated' || entry.lastUpdate?.kind === 'board-imported') || entry.generating) return;
+      if (entry.board.matching || entry.locks.size || isEmpty(entry.board) || (entry.lastUpdate?.kind === 'auto-generated' || entry.lastUpdate?.kind === 'board-imported' || entry.lastUpdate?.kind === 'matching') || entry.generating) return;
       startGeneration(entry, 'mid', 'automatic');
     }, Math.max(0, entry.lastUpdate.at + additionDelayMs - now()));
   }
@@ -148,7 +156,7 @@ export function createBoardService(initialBoards: readonly Board[], options: {
     entry.cancelAddition?.(); entry.cancelAddition = undefined;
     entry.generating = generationId;
     setGeneration(entry, { status: 'running', generationId, level, source });
-    const current = () => !disposed && entry.cardVersion === version && !entry.locks.size;
+    const current = () => !disposed && !entry.board.matching && entry.cardVersion === version && !entry.locks.size;
     // HTTPの受付を確定してから非同期の生成を進める。
     void Promise.resolve().then(async () => {
       try {
@@ -193,10 +201,150 @@ export function createBoardService(initialBoards: readonly Board[], options: {
     entry.cancelTimer = schedule(() => {
       if (disposed || entry.timerVersion !== version || entry.board.timer.state !== 'running') return;
       entry.cancelTimer = undefined;
+      if (entry.board.matching) { matchingDeadline(entry); return; }
       entry.board = { ...entry.board, timer: { durationMs: TIMER_DURATION_MS, state: 'stopped', remainingMs: 0 } };
       onBoardUpdated(entry, 'timer', []);
       (options.onTimerFinished ?? onTimerFinished)(structuredClone(entry.board));
     }, Math.max(0, timer.endsAt - now()));
+  }
+  /** 同じユーザーの複数タブは1人。最後に接続した端末を入力元にする。 */
+  function participants(entry: Entry): Map<string, string> {
+    return new Map([...entry.subscribers].map(subscriber => [subscriber.identity.userId, subscriber.identity.clientId]));
+  }
+  function setMatchingTimer(entry: Entry) {
+    entry.board = { ...entry.board, timer: { durationMs: MATCHING_DURATION_MS, state: 'running', endsAt: now() + MATCHING_DURATION_MS } };
+    armTimer(entry);
+  }
+  function endMatching(entry: Entry) {
+    entry.cancelMatchingClose?.(); entry.cancelMatchingClose = undefined;
+    const board = { ...entry.board, timer: { durationMs: TIMER_DURATION_MS, state: 'stopped' as const, remainingMs: TIMER_DURATION_MS } };
+    delete board.matching;
+    entry.board = board; armTimer(entry);
+  }
+  function nextMatchingTurn(entry: Entry, notice: string) {
+    const game = entry.board.matching!;
+    const users = [...participants(entry).keys()];
+    const remaining = game.slots.filter(Boolean).length + game.reserve.length;
+    if (!users.length || remaining < 2) { endMatching(entry); return; }
+    const candidates = users.length > 1 ? users.filter(user => user !== game.selectorUserId) : users;
+    entry.board = { ...entry.board, matching: { ...game, step: 'selecting', turnId: crypto.randomUUID(),
+      selectorUserId: candidates[Math.floor(random() * candidates.length)], selected: [], drafts: [], finishAfterClosing: undefined, notice } };
+    setMatchingTimer(entry);
+  }
+  function finishMatchingInput(entry: Entry) {
+    const game = entry.board.matching;
+    if (!game || game.step !== 'closing') return;
+    entry.cancelMatchingClose?.(); entry.cancelMatchingClose = undefined;
+    // 本文重複の除外や作者属性の転記は行わない。
+    const cards = placeAddedCards(entry.board, game.drafts.filter(draft => draft.card.text.trim()).map(draft => draft.card));
+    let next = cards.length ? consumeSelected(game) : game;
+    next = { ...next, addedCardIds: [...game.addedCardIds, ...cards.map(card => card.cardId)] };
+    entry.board = { ...entry.board, cards: [...entry.board.cards, ...cards], matching: next };
+    if (game.finishAfterClosing || !participants(entry).size) endMatching(entry);
+    else nextMatchingTurn(entry, cards.length ? `${cards.length}件のアイデアを追加しました。` : '今回は追加なし。2枚を同じ枠で裏に戻しました。');
+    onBoardUpdated(entry, 'matching', cards.map(card => card.cardId));
+  }
+  function closeMatchingInput(entry: Entry, finish = false) {
+    const game = entry.board.matching;
+    if (!game) return;
+    if (game.step === 'selecting') {
+      if (finish) endMatching(entry);
+      else nextMatchingTurn(entry, '選択時間が終了しました。選びかけのカードを裏に戻しました。');
+      onBoardUpdated(entry, 'matching', []); return;
+    }
+    if (game.step === 'closing') {
+      if (finish) entry.board = { ...entry.board, matching: { ...game, finishAfterClosing: true } };
+      if (!participants(entry).size) finishMatchingInput(entry);
+      else if (finish) onBoardUpdated(entry, 'matching', []);
+      return;
+    }
+    entry.board = { ...entry.board, matching: { ...game, step: 'closing', finishAfterClosing: finish },
+      timer: { durationMs: MATCHING_DURATION_MS, state: 'stopped', remainingMs: 0 } };
+    armTimer(entry);
+    const { gameId, turnId } = game;
+    entry.cancelMatchingClose = schedule(() => {
+      if (!disposed && entry.board.matching?.gameId === gameId && entry.board.matching.turnId === turnId) finishMatchingInput(entry);
+    }, MATCHING_FINALIZE_MS);
+    if (!participants(entry).size) finishMatchingInput(entry);
+    else onBoardUpdated(entry, 'matching', []);
+  }
+  function matchingDeadline(entry: Entry) { closeMatchingInput(entry); }
+  function matchingPresenceChanged(entry: Entry) {
+    const game = entry.board.matching;
+    if (!game) return;
+    const users = participants(entry);
+    if (!users.size) { closeMatchingInput(entry, true); return; }
+    if (game.step === 'selecting' && !users.has(game.selectorUserId)) {
+      nextMatchingTurn(entry, '選択担当者が切断したため、担当を交代しました。');
+      onBoardUpdated(entry, 'matching', []); return;
+    }
+    let changed = false;
+    const drafts = game.drafts.map(draft => {
+      const writer = users.get(draft.userId);
+      if (!writer || writer === draft.writerClientId) return draft;
+      changed = true;
+      return { ...draft, writerClientId: writer, writerToken: crypto.randomUUID() };
+    });
+    if (changed) {
+      entry.board = { ...entry.board, matching: { ...game, drafts } };
+      onBoardUpdated(entry, 'matching', []);
+    }
+  }
+  function handleMatching(entry: Entry, command: Extract<BoardCommand, { type: `matching.${string}` }>): EditResult {
+    if (!entry.subscribers.size || ![...entry.subscribers].some(s => s.identity.userId === command.userId && s.identity.clientId === command.clientId))
+      return reject(entry, command, 403, '接続中の端末から操作してください。');
+    if (command.type === 'matching.start') {
+      if (entry.board.matching) return reject(entry, command, 409, 'ゲームは既に開始しています。');
+      if (entry.locks.size) return reject(entry, command, 409, '編集中のカードがあります。全員の編集完了後に開始してください。');
+      if (entry.board.cards.filter(card => card.cardKind === 'word' && card.text.trim()).length < 2)
+        return reject(entry, command, 409, '本文のある通常付箋が2枚以上必要です。');
+      entry.board = { ...entry.board, matching: newMatchingGame(entry.board, command.userId, random) };
+      setMatchingTimer(entry); onBoardUpdated(entry, 'matching', []);
+      return accepted(entry, command, true);
+    }
+    let game = entry.board.matching;
+    if (!game || game.gameId !== command.gameId) return reject(entry, command, 409, 'このゲームは終了しています。');
+    // 時計のコールバックよりHTTPが先に処理されても期限を守る。
+    if (entry.board.timer.state === 'running' && entry.board.timer.endsAt <= now()) {
+      matchingDeadline(entry); game = entry.board.matching;
+      if (!game || game.gameId !== command.gameId) return reject(entry, command, 409, 'このゲームは終了しています。');
+    }
+    switch (command.type) {
+      case 'matching.select': {
+        if (game.turnId !== command.turnId || game.step !== 'selecting') return reject(entry, command, 409, 'この選択時間は終了しています。');
+        if (game.selectorUserId !== command.userId) return reject(entry, command, 403, '現在の担当者だけが単語を選べます。');
+        if (!game.slots.includes(command.copyId) || game.selected.includes(command.copyId)) return reject(entry, command, 409, 'このカードは選べません。');
+        game = { ...game, selected: [...game.selected, command.copyId] };
+        if (game.selected.length === 2) {
+          game = { ...game, step: 'writing', drafts: [...participants(entry)].map(([user, client]) => newMatchingDraft(game!, user, client)) };
+          entry.board = { ...entry.board, matching: game }; setMatchingTimer(entry);
+        } else entry.board = { ...entry.board, matching: game };
+        onBoardUpdated(entry, 'matching', []); return accepted(entry, command, true);
+      }
+      case 'matching.draft': {
+        if (game.turnId !== command.turnId || game.step === 'selecting' || (game.step === 'closing' && !command.final))
+          return reject(entry, command, 409, 'この入力時間は終了しています。');
+        const draft = game.drafts.find(draft => draft.userId === command.userId);
+        if (!draft || draft.writerClientId !== command.clientId || draft.writerToken !== command.writerToken)
+          return reject(entry, command, 403, 'この端末に入力権がありません。最新の接続で入力してください。');
+        if (command.sequence <= draft.sequence) return accepted(entry, command);
+        if (draft.finalized) return reject(entry, command, 409, '最終入力は既に受け取りました。');
+        const drafts = game.drafts.map(item => item === draft ? { ...draft, sequence: command.sequence,
+          finalized: command.final, card: { ...draft.card, text: command.text } } : item);
+        entry.board = { ...entry.board, matching: { ...game, drafts } };
+        onBoardUpdated(entry, 'matching', []); return accepted(entry, command, true);
+      }
+      case 'matching.abort.request':
+        if (game.abortConfirmationId) return accepted(entry, command);
+        entry.board = { ...entry.board, matching: { ...game, abortConfirmationId: crypto.randomUUID() } };
+        onBoardUpdated(entry, 'matching', []); return accepted(entry, command, true);
+      case 'matching.abort.cancel': case 'matching.abort.confirm':
+        if (game.abortConfirmationId !== command.confirmationId) return reject(entry, command, 409, 'この中断確認は終了しています。');
+        entry.board = { ...entry.board, matching: { ...game, abortConfirmationId: undefined } };
+        if (command.type === 'matching.abort.confirm') closeMatchingInput(entry, true);
+        else onBoardUpdated(entry, 'matching', []);
+        return accepted(entry, command, true);
+    }
   }
   function reject(entry: Entry, command: BoardCommand, status: number, reason: string): EditResult {
     return { status, body: event(entry, { type: 'command.rejected', clientId: command.clientId,
@@ -293,7 +441,7 @@ export function createBoardService(initialBoards: readonly Board[], options: {
     onBoardUpdated(entry, 'objects-deleted', affected);
     return accepted(entry, command, true);
   }
-  function handleImmediate(entry: Entry, command: Exclude<BoardCommand, EditCommand | { type: 'board.get' }>): EditResult {
+  function handleImmediate(entry: Entry, command: Exclude<BoardCommand, EditCommand | { type: 'board.get' } | { type: `matching.${string}` }>): EditResult {
     switch (command.type) {
       case 'card.create': {
         const existing = getCard(entry.board, command.card.cardId);
@@ -395,14 +543,17 @@ export function createBoardService(initialBoards: readonly Board[], options: {
     const retained: { fingerprint: string; result?: EditResult } = { fingerprint };
     entry.results.set(key, retained);
     const result = command.type === 'board.get' ? { status: 200, body: snapshot(entry) }
+      : command.type.startsWith('matching.') ? handleMatching(entry, command as Extract<BoardCommand, { type: `matching.${string}` }>)
+      : entry.board.matching ? reject(entry, command, 409, '神経衰弱中は通常のボード操作とタイマー操作を利用できません。')
       : command.type.startsWith('edit.') ? handleEdit(entry, command as EditCommand)
-      : handleImmediate(entry, command as Exclude<BoardCommand, EditCommand | { type: 'board.get' }>);
+      : handleImmediate(entry, command as Parameters<typeof handleImmediate>[1]);
     retained.result = structuredClone(result);
     return structuredClone(result);
   }
   initialBoards.forEach(addBoard);
   return {
     supportsBoardImport: true,
+    supportsMatching: true,
     getBoardSnapshot(boardId: string) { const entry = boards.get(boardId); return entry && !disposed ? snapshot(entry) : undefined; },
     ensureBoard(boardId: string) {
       if (disposed || !validId(boardId)) return false;
@@ -414,9 +565,9 @@ export function createBoardService(initialBoards: readonly Board[], options: {
       if (disposed || !entry || ![identity.boardId, identity.userId, identity.clientId].every(validId)) return undefined;
       const subscriber = { identity: { ...identity }, receive };
       // 登録と初期取得を同じ同期処理で行い、境界で更新を取り逃さない。
-      entry.subscribers.add(subscriber); deliver(entry, subscriber, snapshot(entry));
+      entry.subscribers.add(subscriber); matchingPresenceChanged(entry); deliver(entry, subscriber, snapshot(entry));
       for (const lock of entry.locks.values()) if (lock.check && lock.userId === identity.userId && lock.clientId === identity.clientId) query(entry, lock);
-      return () => { entry.subscribers.delete(subscriber); };
+      return () => { if (entry.subscribers.delete(subscriber)) matchingPresenceChanged(entry); };
     },
     executeCommand,
     executeEdit: executeCommand,
@@ -427,7 +578,7 @@ export function createBoardService(initialBoards: readonly Board[], options: {
     dispose() {
       disposed = true;
       for (const entry of boards.values()) {
-        entry.cancelAddition?.(); entry.cancelTimer?.();
+        entry.cancelAddition?.(); entry.cancelTimer?.(); entry.cancelMatchingClose?.();
         entry.locks.forEach(stopLockTimers); entry.subscribers.clear();
       }
     },

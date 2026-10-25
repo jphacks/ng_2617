@@ -12,6 +12,7 @@
 - 手動／自動で共通の候補生成・配置、関連性指定、生成状態と生成IDの配信、端末ごとの画面外案内。
 - 要求IDの二重実行防止、異内容の拒否とログ、HTTPのタイムアウト時の状態保持・元の要求の再送。
 - `Adjust` の配置を基準にした画面と `Adjust_room` のルーム入口。`/room/:roomId` で同じボードを共有する。
+- 神経衰弱の専用UI。全カードのゲーム用コピー、最大10枠と単語補充、選択・入力各10秒、全員の入力共有、作者を残さないアイデア追加、1人プレイ、共有の中断確認、切断時の担当交代・0人での終了。詳細は [matching-game-ui.md](./matching-game-ui.md)。
 
 ## 未確定だった点で今回採用した実装
 
@@ -41,9 +42,11 @@
 - `src/domain/board.ts`：モデル・ID・既定値・純粋操作・サンプル。
 - `src/domain/board-protocol.ts`：コマンド、スナップショット、生成状態、属性パッチ。
 - `src/domain/board-validation.ts`：HTTP要求とHTTP/SSE受信値の実行時検証。
+- `src/domain/matching.ts`：共有ゲーム状態、入力権、選択・入力・最終集約の時間。
 - `src/server/board-service.ts`：種類別ハンドラー、貸し出し台帳・カード索引、一括更新、再送結果管理。
 - `src/server/edit-lifecycle.ts`：期限5分、問い合わせ10秒、自動追加待機30秒、最大3語。
 - `src/server/word-addition.ts`：候補の重複除去と既存カードの右への配置。
+- `src/server/matching-game.ts`：全カードのコピー・シャッフル、入力カード作成、固定枠への補充。期限・接続・競合制御はboard-serviceへ接続。
 - `src/server/ai-service.ts`：関連性を受け取るモック候補生成。外部AI APIは呼ばない。
 - `src/server/board-timer.ts`：0秒到達時の空の `onTimerFinished` 拡張点。
 - `src/client/board-client.ts`：確定状態・下書き・仮表示・送信状態・再送。
@@ -51,6 +54,7 @@
 - `src/client/generated-guidance.ts`：端末の表示範囲とカード全体による案内判定。
 - `src/components/Board.tsx` / `BoardCard.tsx`：React Flowと共通クライアントの接続。
 - `src/components/CardTextInput.ts`：IME入力をノードの非同期反映から分離し、入力値と変換中のキー操作を保護。
+- `src/components/MatchingGame.tsx` / `MatchingTextInput.ts` / `matching.css`：専用の選択・入力画面、共有中断確認、期限時点のIME確定と最終送信。
 
 ## 運用上の範囲
 
@@ -71,3 +75,6 @@ npm run build
 
 実施結果：IMEのDOM回帰テスト6件を含む63件のテスト成功、TypeScript成功、lintは既存の `AIapi.ts` の未使用関数警告1件のみ、Turbopack本番ビルド成功。ビルド時に過去の権限制限エラーがキャッシュされていたため、古いキャッシュを退避して再実行した。
 ブラウザの2画面でも、本文・ロック・リアクション・共有タイマー・単一／複数移動・左上リサイズの同期を確認した。空カード2種の配置、矢印の作成、関連先選択とEscape、空白タップによる確定、関連性を指定した手動生成、画面外案内も確認した。
+
+神経衰弱の追加検証：仮想時計で1人・複数人の進行、表示枠の補充、全員空・選択時間切れ、途中参加・入力元の引き継ぎ、中断と期限の競合、0人での終了、遅延送信と古い予約、通常操作の拒否、重複本文の保持・重ならない配置を検証。HTTP/SSEの複数端末とDOMで、下書き同期・再接続・IME確定・終了後の案内を検証した。ブラウザでも1人プレイと2画面での本文共有、選択→日本語入力→通常ボードへの追加、要求者以外による共有中断の確定、タイマー5分停止への復帰を確認した。実装は最終本文の集約に最大1秒を使うが、編集時間は10秒のまま。
+追加後の検証結果：全110件のテスト、TypeScript、本番ビルドが成功。lintはエラーなしで、既存の `StormAnimation.tsx` と `AIapi.ts` の警告2件のみ。Turbopackの権限制限エラーが残ったキャッシュを退避し、ローカルポートを利用できる環境で本番ビルドを確認した。

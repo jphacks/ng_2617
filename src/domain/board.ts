@@ -1,4 +1,5 @@
 import { randomUUID } from './uuid.ts';
+import type { MatchingGame } from './matching';
 
 /** JSONで共有するモデル。選択・仮移動・表示範囲はここに保存しない。 */
 export type BoardObjectId = Readonly<{ type: 'card'; uuid: string }> | Readonly<{ type: 'arrow'; uuid: string }>;
@@ -30,7 +31,7 @@ export type BoardTimer = Readonly<{ durationMs: number }> & (
   | Readonly<{ state: 'running'; endsAt: number }>
 );
 export type Board = Readonly<{
-  boardId: string; cards: readonly Card[]; arrows: readonly Arrow[]; timer: BoardTimer;
+  boardId: string; cards: readonly Card[]; arrows: readonly Arrow[]; timer: BoardTimer; matching?: MatchingGame;
 }>;
 export type RelationLevel = 'low' | 'mid' | 'high';
 
