@@ -30,6 +30,8 @@ export type ImmediateCommand = Request & (
   | { type: 'objects.delete'; objectIds: readonly BoardObjectId[] }
   | { type: 'board.import'; file: BoardFile }
   | { type: 'board.clear' | 'board.restore-sample' }
+  | { type: 'board.settings.update'; autoGenerationEnabled: boolean }
+  | { type: 'board.leave' }
   | { type: 'reaction.add' | 'reaction.remove'; cardId: CardId; reactionId: string }
   | { type: 'arrow.create'; arrow: Arrow }
   | { type: 'arrow.delete'; arrowId: ArrowId }

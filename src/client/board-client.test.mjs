@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { BoardRequestRejectedError } from './board-transport-error.ts';
 import { createBoardClient } from './board-client.ts';
 import { createBoardService } from '../server/board-service.ts';
 import { getCard, objectKey } from '../domain/board.ts';
@@ -174,4 +175,37 @@ test('下書きからID・種類・リアクションを混入させず、不正
     assert.equal(s.client.updateDraft(patch), false);
   }
   assert.equal(s.current().edit.phase, 'editing');
+});
+
+test('嵐の通知は実際の追加だけを1回伝え、確認後・再接続後の過去通知は再生しない', t => {
+  const s = setup(t); const generated = board([...board().cards, word(4)]);
+  s.emit(snapshot(generated, 1, { type: 'generation.updated', generationSequence: 1,
+    generation: { status: 'completed', generationId: 'empty', source: 'manual', level: 'mid', message: '候補なし' } }));
+  assert.equal(s.current().latestGenerationEvent, null);
+  const event = snapshot(generated, 2, { type: 'board.cards-generated', eventId: 'added', generationId: 'automatic', generatedCardIds: [cid(4)] });
+  s.emit(event); assert.deepEqual(s.current().latestGenerationEvent, { eventId: 'added' });
+  s.client.acknowledgeGenerationEvent('other'); assert.ok(s.current().latestGenerationEvent);
+  s.client.acknowledgeGenerationEvent('added'); s.emit(event); assert.equal(s.current().latestGenerationEvent, null);
+  s.client.disconnect(); s.client.connect(); s.emit(snapshot(generated, 2));
+  s.emit({ ...event, eventId: 'late-on-reconnect' }); assert.equal(s.current().latestGenerationEvent, null);
+  s.emit(snapshot(generated, 3, { type: 'board.cards-generated', eventId: 'new-manual', generationId: 'manual', generatedCardIds: [cid(4)] }));
+  assert.deepEqual(s.current().latestGenerationEvent, { eventId: 'new-manual' });
+});
+
+test('同じエラーの再発は新しい通知となり、通常の同期では表示期限を更新しない', t => {
+  const s = setup(t); s.request();
+  s.transport.send = () => { throw new Error('network'); };
+  s.client.retryPending(); const first = s.current().errorSequence;
+  assert.ok(first > 0); s.emit(s.service.getBoardSnapshot('board')); assert.equal(s.current().errorSequence, first);
+  s.client.retryPending(); assert.equal(s.current().errorSequence, first + 1); assert.equal(s.current().error, 'network');
+});
+
+
+test('旧サーバーが未対応のボード設定要求は保留を除去してエラーを通知する', async t => {
+  const s = setup(t);
+  s.transport.send = () => { throw new BoardRequestRejectedError('開発サーバーを再起動してください。'); };
+  s.client.execute({ type: 'board.settings.update', autoGenerationEnabled: false });
+  await flush();
+  assert.equal(s.current().pendingCommands.length, 0);
+  assert.ok(s.current().error.includes('再起動'));
 });

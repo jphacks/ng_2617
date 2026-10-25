@@ -32,6 +32,7 @@ export type BoardTimer = Readonly<{ durationMs: number }> & (
 );
 export type Board = Readonly<{
   boardId: string; cards: readonly Card[]; arrows: readonly Arrow[]; timer: BoardTimer; matching?: MatchingGame;
+  settings: Readonly<{ autoGenerationEnabled: boolean }>;
 }>;
 export type RelationLevel = 'low' | 'mid' | 'high';
 
@@ -55,7 +56,8 @@ export const newCardId = (): CardId => ({ type: 'card', uuid: randomUUID() });
 export const newArrowId = (): ArrowId => ({ type: 'arrow', uuid: randomUUID() });
 
 export function createBoard(boardId: string): Board {
-  return { boardId, cards: [], arrows: [], timer: { durationMs: TIMER_DURATION_MS, state: 'stopped', remainingMs: TIMER_DURATION_MS } };
+  return { boardId, cards: [], arrows: [], settings: { autoGenerationEnabled: true },
+    timer: { durationMs: TIMER_DURATION_MS, state: 'stopped', remainingMs: TIMER_DURATION_MS } };
 }
 export function createEmptyCard(cardKind: Card['cardKind'], position: CardPosition, color = '#FFF0A8', cardId = newCardId()): Card {
   const { width, height } = CARD_SIZES[cardKind];

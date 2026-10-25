@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { BoardRequestRejectedError } from './board-transport-error.ts';
 import { createHttpBoardTransport } from './http-board-transport.ts';
 import { board, cid, commands, identity, snapshot } from '../test/board-fixtures.mjs';
 import { createBoardService } from '../server/board-service.ts';
@@ -68,4 +69,21 @@ test('SSE切断はクライアントをオフラインにする', async t => {
   const service = createBoardService([board()]); const { client, streams } = connectedClient(service, identity);
   t.after(() => { client.disconnect(); service.dispose(); }); client.connect(); await until(() => client.getSnapshot().status === 'ready');
   streams[0].onerror(); assert.equal(client.getSnapshot().status, 'offline'); assert.equal(streams[0].closed, true);
+});
+
+test('退室のkeepalive要求は購読なしでも送信し、購読解除で中断しない', async t => {
+  let options; let finish;
+  const s = setup(t, (_url, request) => { options = request; return new Promise(resolve => { finish = resolve; }); });
+  const leaving = s.transport.send(s.command('board.leave'));
+  s.stop();
+  assert.equal(options.keepalive, true); assert.equal(options.signal, undefined);
+  finish(Response.json({})); await leaving;
+  const again = s.transport.send(s.command('board.leave'));
+  finish(Response.json({})); await again;
+});
+
+test('旧サーバーの設定未対応は再送待ちにせず再起動が必要な拒否として返す', async t => {
+  const s = setup(t, async () => Response.json({ code: 'SERVER_RESTART_REQUIRED', error: '開発サーバーを再起動してください。' }, { status: 503 }));
+  await assert.rejects(s.transport.send(s.command('board.settings.update', { autoGenerationEnabled: false })), error =>
+    error instanceof BoardRequestRejectedError && error.message.includes('再起動'));
 });
