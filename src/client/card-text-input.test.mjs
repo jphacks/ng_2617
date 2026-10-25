@@ -3,6 +3,7 @@ import test from 'node:test';
 import { JSDOM } from 'jsdom';
 import { act, createElement } from 'react';
 import { CardTextInput } from '../components/CardTextInput.ts';
+import { focusTextInput } from './focus-text-input.ts';
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost' });
 for (const name of ['window', 'document', 'navigator', 'HTMLElement', 'HTMLTextAreaElement', 'Node', 'Event', 'InputEvent', 'CompositionEvent', 'KeyboardEvent']) {
@@ -36,7 +37,7 @@ async function setup(t) {
   };
   const key = (key, options = {}) => dispatch(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...options }));
   t.after(async () => { await act(() => root.unmount()); host.remove(); });
-  return { host, input, changes, keys, render, type, start, end, key };
+  return { host, input, changes, keys, render, dispatch, type, start, end, key };
 }
 
 test('ノードへの反映が遅れても入力イベント直後の日本語を古い値へ巻き戻さない', async t => {
@@ -100,4 +101,45 @@ test('取消・編集権消失では変換中のローカル値を破棄し、�
   assert.equal(s.input.value, '次の本文');
   await s.type('次の本文を編集'); assert.equal(s.input.value, '次の本文を編集');
   await s.key('Escape'); assert.deepEqual(s.keys, ['Escape']);
+});
+
+test('許可待ちでも入力用フォーカスを作り、許可前の本文・貼り付け・変換は保存しない', async t => {
+  const s = await setup(t); await s.render({ editSession: null, readOnly: false });
+  s.input.blur(); focusTextInput(s.input);
+  assert.equal(document.activeElement, s.input); assert.equal(s.input.readOnly, false);
+  for (const type of ['beforeinput', 'paste', 'cut', 'drop']) {
+    const event = await s.dispatch(new Event(type, { bubbles: true, cancelable: true }));
+    assert.equal(event.defaultPrevented, true, type);
+  }
+  await s.start(); await s.type('許可前の変換', true); await s.end('許可前の確定');
+  assert.equal(s.input.value, '元の本文'); assert.deepEqual(s.changes, []);
+  await s.render({ editSession: 'granted', readOnly: false });
+  assert.equal(document.activeElement, s.input);
+  const allowed = await s.dispatch(new Event('beforeinput', { bubbles: true, cancelable: true }));
+  assert.equal(allowed.defaultPrevented, false);
+  await s.type('許可後の本文'); assert.deepEqual(s.changes, ['許可後の本文']);
+});
+
+test('許可拒否で読み取り専用へ戻った入力欄は、遅いIME確定でも本文を書き換えない', async t => {
+  const s = await setup(t); await s.render({ editSession: null, readOnly: false });
+  await s.render({ editSession: null, readOnly: true, disabled: true });
+  await s.end('拒否後に届いた変換'); await s.type('拒否後の入力');
+  assert.equal(s.input.value, '元の本文'); assert.deepEqual(s.changes, []);
+});
+
+test('通常カードも押下時にはフォーカスせず、完了したタップだけで入力を開始する', async t => {
+  const s = await setup(t); await s.render({ editSession: null, readOnly: false }); s.input.blur();
+  const down = new Event('pointerdown', { bubbles: true, cancelable: true });
+  Object.defineProperty(down, 'pointerType', { value: 'touch' }); await s.dispatch(down);
+  assert.notEqual(document.activeElement, s.input);
+  await s.dispatch(new Event('click', { bubbles: true, cancelable: true })); assert.equal(document.activeElement, s.input);
+  await s.render({ editSession: 'granted', readOnly: false }); await s.type('日本語を入力');
+  assert.equal(document.activeElement, s.input); assert.deepEqual(s.changes, ['日本語を入力']);
+});
+
+test('関連先選択でキャンセルしたclickは入力欄を再フォーカスしない', async t => {
+  const s = await setup(t); s.input.blur(); await s.render({ onClick: event => event.preventDefault() });
+  const down = new Event('pointerdown', { bubbles: true, cancelable: true });
+  Object.defineProperty(down, 'pointerType', { value: 'touch' }); await s.dispatch(down);
+  await s.dispatch(new Event('click', { bubbles: true, cancelable: true })); assert.notEqual(document.activeElement, s.input);
 });

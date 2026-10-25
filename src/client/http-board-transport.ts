@@ -72,7 +72,7 @@ export function createHttpBoardTransport(fetcher: typeof fetch = fetch,
           headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(command),
         });
         const value: unknown = await response.json();
-        if (command.type === 'board.import' && response.status === 503 && record(value) &&
+        if ((command.type === 'board.import' || command.type.startsWith('matching.')) && response.status === 503 && record(value) &&
             value.code === 'SERVER_RESTART_REQUIRED' && typeof value.error === 'string' && value.error.length <= 1000) {
           throw new BoardRequestRejectedError(value.error);
         }

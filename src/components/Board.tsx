@@ -7,7 +7,8 @@ import Link from 'next/link';
 import { ReactFlow, ReactFlowProvider, Background, BackgroundVariant, Controls, MarkerType, SelectionMode, ConnectionMode,
   useReactFlow, useViewport, type NodeChange, type EdgeChange, type Edge, type Connection } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { createBoardClient, type BoardClient } from '@/client/board-client';
+import './matching.css';
+import { createBoardClient, type BoardClient, type BoardClientState } from '@/client/board-client';
 import { createHttpBoardTransport } from '@/client/http-board-transport';
 import { useBoardClient } from '@/client/use-board-client';
 import { generatedGuidance } from '@/client/generated-guidance';
@@ -20,6 +21,7 @@ import type { BoardFile } from '@/domain/board-file';
 import { downloadBoardJson, readBoardFile } from '@/client/board-file';
 import { downloadBoardSvg } from '@/client/board-svg';
 import { StormAnimation } from './StormAnimation';
+import { MatchingGame } from './MatchingGame';
 
 const nodeTypes = { card: BoardCard };
 const COLORS = ['#FFF0A8', '#FFDCE5', '#D9E9FF', '#DDF5D7', '#EADFFF', '#FFFFFF'];
@@ -40,11 +42,14 @@ export function Board({ boardId }: { boardId: string }) {
     setClient(instance);
     return () => instance.disconnect();
   }, [boardId]);
-  return client ? <ReactFlowProvider><BoardCanvas key={boardId} client={client} /></ReactFlowProvider>
+  return client ? <ReactFlowProvider><ConnectedBoard key={boardId} client={client} /></ReactFlowProvider>
     : <div className="board-loading" role="status">ボードを準備中…</div>;
 }
-function BoardCanvas({ client }: { client: BoardClient }) {
+function ConnectedBoard({ client }: { client: BoardClient }) {
   const { state } = useBoardClient(client);
+  return state.board?.matching ? <MatchingGame client={client} state={state} /> : <BoardCanvas client={client} state={state} />;
+}
+function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClientState }) {
   const flow = useReactFlow<BoardNode>();
   const viewport = useViewport();
   const surface = useRef<HTMLDivElement>(null);
@@ -118,6 +123,10 @@ function BoardCanvas({ client }: { client: BoardClient }) {
 
   const importPending = state.importState.status === 'pending';
   const fileBusy = !ready || editing || importPending || readingFile || state.pendingCommands.length > 0;
+  const matchingBlocked = !ready ? '接続が戻ってから開始できます。'
+    : board?.cards.some(card => card.editingUser) || editing ? '全員のカード編集が終わると開始できます。'
+    : (board?.cards.filter(card => card.cardKind === 'word' && card.text.trim()).length ?? 0) < 2 ? '本文のある通常付箋を2枚以上用意してください。'
+    : state.pendingCommands.length || importPending || readingFile || candidate ? '処理が完了してから開始できます。' : null;
   const syncError = state.importState.status === 'rejected' && state.error === state.importState.message ? null : state.error;
   function exportFile(kind: 'json' | 'svg') {
     if (!board || fileBusy) return;
@@ -299,6 +308,10 @@ function BoardCanvas({ client }: { client: BoardClient }) {
         <p className="muted">キャンバスをタップして配置</p>
       </aside>}
       <div className="board-top-right">
+        <div className="matching-start-control"><button type="button" className="matching-start primary" disabled={!!matchingBlocked}
+          title={matchingBlocked ?? '単語を2枚選び、全員でアイデアを書くゲームを開始'}
+          onClick={() => client.execute({ type: 'matching.start' })}>✦ 神経衰弱をはじめる</button>
+          {matchingBlocked && <small>{matchingBlocked}</small>}</div>
         <div className="timer-panel panel"><span aria-hidden="true">◷</span><output aria-label="共有タイマー">{timerLabel}</output>
           <button type="button" disabled={!ready || (timer?.state === 'stopped' && !timer.remainingMs)} onClick={() => client.execute({ type: timer?.state === 'running' ? 'timer.stop' : 'timer.start' })}>{timer?.state === 'running' ? '停止' : '開始'}</button>
           <button type="button" disabled={!ready} onClick={() => client.execute({ type: 'timer.reset' })}>リセット</button>
@@ -318,6 +331,7 @@ function BoardCanvas({ client }: { client: BoardClient }) {
       {candidate && <ImportBoardDialog candidate={candidate} onCancel={() => setCandidate(null)} onConfirm={confirmImport} />}
       {fileMessage && <BoardNotice noticeId={fileMessage} persistent={fileMessage.error}
         className="file-message panel" role={fileMessage.error ? 'alert' : 'status'}>{fileMessage.text}</BoardNotice>}
+      {state.matchingNotice && <BoardNotice noticeId={state.matchingNotice} className="matching-end-notice panel" role="status">{state.matchingNotice}</BoardNotice>}
       {!fileMessage && readingFile && <div className="file-message panel" role="status">ファイルを確認中…</div>}
       {state.importState.status !== 'idle' && <BoardNotice
         noticeId={`import:${state.importState.requestId}:${state.importState.status}`}
@@ -359,6 +373,7 @@ function BoardCanvas({ client }: { client: BoardClient }) {
         <p>上部のつまみで移動。Shiftで複数選択し、まとめて移動できます。選択したカードの四隅でサイズを変更します。</p>
         <p>関連カードには通常付箋・関連カードの両方を関連付けできます。選択中のEscapeは関連先の選択だけを中止します。</p>
         <p>リアクション・矢印・タイマーは全員に同期します。全員の編集終了から30秒後に候補が追加されます。</p>
+        <p>通常付箋が2枚以上あれば「神経衰弱をはじめる」で開始。選択とアイデア入力は各10秒。1人でも遊べて、書いたアイデアはボードに残ります。</p>
       </aside>}
       {showStorm && (
         <>

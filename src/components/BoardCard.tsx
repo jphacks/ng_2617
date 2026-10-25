@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useContext } from 'react';
+import { createContext, useContext, useRef } from 'react';
 import { Handle, Position, NodeResizeControl, type Node, type NodeProps } from '@xyflow/react';
 import type { Board, Card, CardId } from '@/domain/board';
 import { CARD_SIZES, MAX_CARD_SIZE, REACTIONS, getCard, objectKey, sameObjectId } from '@/domain/board';
@@ -28,6 +28,7 @@ const anchors = [
 export function BoardCard({ data: { card }, selected }: NodeProps<BoardNode>) {
   const context = useContext(BoardContext)!;
   const { client, state, relatedTarget } = context;
+  const suppressTextClick = useRef(false);
   const edit = state.edit;
   const key = objectKey(card.cardId);
   const owned = edit.phase !== 'idle' && edit.cardIds.some(id => sameObjectId(id, card.cardId));
@@ -35,6 +36,9 @@ export function BoardCard({ data: { card }, selected }: NodeProps<BoardNode>) {
   const waiting = owned && edit.phase === 'requesting';
   const locked = !!card.editingUser && !owned;
   const canStart = context.editingEnabled && state.status === 'ready' && !locked && (edit.phase === 'idle' || editing);
+  // モバイルSafariはreadOnlyな欄へ最初にフォーカスするとキーボードを開かない。
+  // 欄はタップ時から有効にし、許可前の本文変更はCardTextInputで止める。
+  const keyboardEnabled = !relatedTarget && (canStart || (waiting && edit.mode === 'text' && edit.intent === 'editing'));
   const canResize = state.status === 'ready' && selected && !relatedTarget &&
     (edit.phase === 'idle' || (owned && edit.mode === 'transform' && edit.intent === 'editing'));
   const size = CARD_SIZES[card.cardKind];
@@ -91,13 +95,25 @@ export function BoardCard({ data: { card }, selected }: NodeProps<BoardNode>) {
         </div>
       )}
       {card.cardKind === 'block' && <label className="text-caption" htmlFor={`text-${card.cardId.uuid}`}>概要</label>}
-      <CardTextInput id={`text-${card.cardId.uuid}`} className="card-text nodrag nowheel" value={card.text}
+      <CardTextInput id={`text-${card.cardId.uuid}`} className="card-text nodrag nopan nowheel" value={card.text}
         editSession={editing ? edit.lockId ?? null : null}
         style={{ fontSize: autoFontSize(card) }} aria-label={card.cardKind === 'word' ? '付箋の本文' : '関連カードの概要'}
         placeholder={card.cardKind === 'word' ? 'アイデアを入力' : 'アイデアをまとめる'} maxLength={100_000}
-        readOnly={!editing} disabled={state.status !== 'ready' || locked}
+        readOnly={!keyboardEnabled} disabled={state.status !== 'ready' || locked} inputMode="text"
         onPointerDown={event => {
+          suppressTextClick.current = !!relatedTarget;
           if (relatedTarget) { event.preventDefault(); event.stopPropagation(); context.selectRelated(card.cardId); }
+          else if (keyboardEnabled) {
+            event.stopPropagation();
+          }
+        }}
+        onClick={event => {
+          if (suppressTextClick.current) {
+            suppressTextClick.current = false; event.preventDefault(); event.stopPropagation(); return;
+          }
+          if (!keyboardEnabled) return;
+          event.stopPropagation();
+          if (client.getSnapshot().edit.phase === 'idle') client.requestEdit(card.cardId);
         }}
         onFocus={() => { if (canStart && !relatedTarget && edit.phase === 'idle') client.requestEdit(card.cardId); }}
         onValueChange={text => { client.updateDraft({ text }, card.cardId); }} />

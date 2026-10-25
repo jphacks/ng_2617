@@ -21,10 +21,14 @@ type Session = Readonly<{
 }>;
 export type EditState = Readonly<{ phase: 'idle' }> | Session;
 export type ImportState = Readonly<{ status: 'idle' }> | Readonly<{ status: 'pending' | 'succeeded' | 'rejected'; requestId: string; message?: string }>;
+export type MatchingInput = Readonly<{
+  gameId: string; turnId: string; writerToken: string; sequence: number; text: string; finalRequested: boolean;
+}>;
 export type BoardClientState = Readonly<{
   importState: ImportState; identity: ClientIdentity; status: 'offline' | 'loading' | 'ready'; board: Board | null; revision: number;
   edit: EditState; error: string | null; generation: GenerationState; generationSequence: number;
   generatedCardIds: readonly CardId[]; pendingCommands: readonly BoardCommand[]; serverOffsetMs: number;
+  matchingInput: MatchingInput | null; matchingNotice: string | null;
 }>;
 
 /** 1端末の確定状態・許可待ちの仮表示・許可済み下書きを分離する。 */
@@ -32,6 +36,7 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
   let state: BoardClientState = {
     importState: { status: 'idle' }, identity: { ...identity }, status: 'offline', board: null, revision: -1, edit: { phase: 'idle' }, error: null,
     generation: { status: 'idle' }, generationSequence: -1, generatedCardIds: [], pendingCommands: [], serverOffsetMs: 0,
+    matchingInput: null, matchingNotice: null,
   };
   const listeners = new Set<() => void>();
   const pending = new Map<string, BoardCommand>();
@@ -66,6 +71,9 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
         pending.delete(command.requestId);
         publish({ importState: { status: 'rejected', requestId: command.requestId, message: error.message }, error: error.message });
         return;
+      }
+      if (command.type.startsWith('matching.') && error instanceof BoardRequestRejectedError) {
+        pending.delete(command.requestId); publish({ error: error.message }); return;
       }
       // HTTP失敗は拒否・切断ではない。SSEと確定/取消の最終内容を残す。
       publish({ error: error instanceof Error ? error.message : '応答を確認できません。元の要求を再送できます。' });
@@ -204,6 +212,25 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
       seenGenerationEvents.add(value.eventId);
       generatedCardIds = [...new Map([...generatedCardIds, ...value.generatedCardIds.filter(id => getCard(board!, id))].map(id => [objectKey(id), id])).values()];
     }
+    const game = board.matching;
+    const ownDraft = game?.drafts.find(draft => draft.userId === identity.userId && draft.writerClientId === identity.clientId);
+    let matchingInput = state.matchingInput;
+    if (!game || !ownDraft) matchingInput = null;
+    else if (!matchingInput || matchingInput.gameId !== game.gameId || matchingInput.turnId !== game.turnId || matchingInput.writerToken !== ownDraft.writerToken ||
+      ownDraft.sequence > matchingInput.sequence || ownDraft.finalized) {
+      matchingInput = { gameId: game.gameId, turnId: game.turnId, writerToken: ownDraft.writerToken,
+        sequence: ownDraft.sequence, text: ownDraft.card.text, finalRequested: ownDraft.finalized };
+    }
+    // 切断中の本文は同じ入力権・手番・期限内の場合だけ再送できる。
+    for (const [requestId, command] of pending) if (command.type.startsWith('matching.') && 'gameId' in command &&
+      (!game || command.gameId !== game.gameId || ('turnId' in command && command.turnId !== game.turnId))) pending.delete(requestId);
+    let matchingNotice = state.matchingNotice;
+    if (state.board?.matching && !game) {
+      const before = state.board;
+      const added = [...before.matching!.addedCardIds, ...board.cards.filter(card => !getCard(before, card.cardId)).map(card => card.cardId)];
+      generatedCardIds = [...new Map([...generatedCardIds, ...added].map(id => [objectKey(id), id])).values()];
+      matchingNotice = `神経衰弱を終了しました。${added.length}件のアイデアをボードに残しました。`;
+    } else if (game) matchingNotice = null;
     if (edit.phase === 'idle') {
       answeredChecks.clear();
       if (state.edit.phase !== 'idle') {
@@ -213,7 +240,13 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
         }
       }
     }
-    publish({ importState, status: 'ready', board, revision, edit, error, generation, generationSequence, generatedCardIds, serverOffsetMs });
+    publish({ importState, status: 'ready', board, revision, edit, error, generation, generationSequence, generatedCardIds, serverOffsetMs, matchingInput, matchingNotice });
+    if (initializing && game && matchingInput && ownDraft && !ownDraft.finalized && matchingInput.sequence > ownDraft.sequence &&
+        ((game.step === 'writing' && board.timer.state === 'running' && board.timer.endsAt > Date.now() + serverOffsetMs) ||
+          (game.step === 'closing' && matchingInput.finalRequested))) {
+      send({ ...identity, type: 'matching.draft', requestId: createRequestId(), gameId: game.gameId, turnId: game.turnId,
+        writerToken: matchingInput.writerToken, sequence: matchingInput.sequence, text: matchingInput.text, final: matchingInput.finalRequested });
+    }
     if (finishAfterGrant) complete();
     if (value.type === 'edit.check') answerCheck(value);
     if (initializing) {
@@ -245,7 +278,7 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     connect, disconnect: () => offline(null),
     requestEdit(ids: CardId | readonly CardId[], mode: 'text' | 'transform' = 'text'): boolean {
-      if (state.status !== 'ready' || state.importState.status === 'pending' || state.edit.phase !== 'idle' || !state.board) return false;
+      if (state.status !== 'ready' || state.importState.status === 'pending' || state.edit.phase !== 'idle' || !state.board || state.board.matching) return false;
       const cardIds = Array.isArray(ids) ? ids : [ids as CardId];
       if (!cardIds.length || new Set(cardIds.map(objectKey)).size !== cardIds.length) return false;
       const bases: Record<string, CardContent> = {};
@@ -288,11 +321,26 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
     },
     execute(operation: ImmediateOperation): boolean {
       if (state.status !== 'ready' || state.importState.status === 'pending') return false;
+      if (state.board?.matching && !operation.type.startsWith('matching.')) return false;
       if (operation.type === 'board.import' && (state.edit.phase !== 'idle' || pending.size > 0)) return false;
       const requestId = createRequestId();
       if (operation.type === 'board.import') publish({ importState: { status: 'pending', requestId }, error: null });
       send({ ...structuredClone(operation), ...identity, requestId } as BoardCommand); publish({});
       return true;
+    },
+    updateMatchingDraft(text: string, final = false): boolean {
+      const input = state.matchingInput; const game = state.board?.matching;
+      if (!input || !game || game.step === 'selecting' || text.length > 100_000 || input.finalRequested) return false;
+      const timer = state.board!.timer;
+      const expired = timer.state !== 'running' || timer.endsAt <= Date.now() + state.serverOffsetMs;
+      if (!final && (expired || game.step !== 'writing')) return false;
+      // 切断中もローカルの本文は維持する。
+      const next = { ...input, text, sequence: input.sequence + 1, finalRequested: final && state.status === 'ready' };
+      publish({ matchingInput: next });
+      if (state.status !== 'ready') return false;
+      send({ ...identity, type: 'matching.draft', requestId: createRequestId(), gameId: input.gameId, turnId: input.turnId,
+        writerToken: input.writerToken, sequence: next.sequence, text, final });
+      publish({}); return true;
     },
     retryPending() { for (const command of [...pending.values()]) send(command); },
     dismissGuidance(cardIds: readonly CardId[]) {

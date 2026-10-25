@@ -21,6 +21,11 @@ export type EditCommand = Request & (
   ))
 );
 export type ImmediateCommand = Request & (
+  | { type: 'matching.start' }
+  | { type: 'matching.select'; gameId: string; turnId: string; copyId: string }
+  | { type: 'matching.draft'; gameId: string; turnId: string; writerToken: string; sequence: number; text: string; final: boolean }
+  | { type: 'matching.abort.request'; gameId: string }
+  | { type: 'matching.abort.confirm' | 'matching.abort.cancel'; gameId: string; confirmationId: string }
   | { type: 'card.create'; card: Card }
   | { type: 'objects.delete'; objectIds: readonly BoardObjectId[] }
   | { type: 'board.import'; file: BoardFile }
