@@ -307,7 +307,7 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
       </ReactFlow>}
       {!board && <div className="board-loading" role="status">{state.status === 'offline' ? 'ボードに接続できませんでした' : 'ボードを読み込み中…'}</div>}
       {ready && board && !board.cards.length && <div className="empty-board"><b>最初のアイデアを置いてみましょう</b><p>左の「付箋を追加」から配置できます。</p></div>}
-      <header className="board-brand panel"><Link href="/" onNavigate={() => client.leave()} aria-label="ルーム一覧へ">◈</Link><div><strong>Idea Board</strong><small>ルーム：{state.identity.boardId}</small></div>
+      <header className="board-brand panel"><Link href="/" onNavigate={() => client.leave()} aria-label="ルーム一覧へ">◈</Link><div><strong>芽生え</strong><small>ルーム：{state.identity.boardId}</small></div>
         <span className={`connection-dot ${ready ? 'connected' : ''}`} title={ready ? '同期中' : '未接続'} />
       </header>
       <nav className="board-toolbar panel" aria-label="ボードのツール">

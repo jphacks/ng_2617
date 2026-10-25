@@ -48,7 +48,7 @@ export function MatchingGame({ client, state }: { client: BoardClient; state: Bo
   return <main className="matching-screen">
     <header className="matching-header">
       <div className="matching-brand"><Link href="/" aria-label="ルーム一覧へ" onNavigate={client.leave}>◈</Link>
-        <div><strong>Idea Board <span>神経衰弱</span></strong><small>ルーム：{state.identity.boardId}</small></div>
+        <div><strong>芽生え <span>神経衰弱</span></strong><small>ルーム：{state.identity.boardId}</small></div>
       </div>
       <div className="matching-stage" role="status" aria-live="polite">{stage}</div>
       <div className="matching-header-actions">

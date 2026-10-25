@@ -63,7 +63,7 @@ function outside(point: Point, anchor: Anchor): Point {
 }
 export function createBoardSvg(board: Board): string {
   createBoardFile(board); // JSONと同じモデル・参照・座標の検証を使う。
-  if (!board.cards.length) return '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200" viewBox="0 0 400 200"><rect width="100%" height="100%" fill="#fff"/><text x="30" y="60" font-family="sans-serif" font-size="18">空のボード</text></svg>';
+  if (!board.cards.length) return '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200" viewBox="0 0 400 200"><title>芽生え — ボード</title><rect width="100%" height="100%" fill="#fff"/><text x="30" y="60" font-family="sans-serif" font-size="18">空のボード</text></svg>';
   const points: Point[] = board.cards.flatMap(card => [card.position,
     { x: card.position.x + card.shape.width, y: card.position.y + card.shape.height }]);
   const arrows = board.arrows.map(arrow => {
@@ -80,11 +80,11 @@ export function createBoardSvg(board: Board): string {
   const height = Math.max(...points.map(point => point.y)) + MARGIN - minY;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="${minX} ${minY} ${width} ${height}">
-<title>ブレインストーミングボード</title><desc>確定済みのカードと矢印を出力したボード</desc>
+<title>芽生え — ボード</title><desc>確定済みのカードと矢印を出力したボード</desc>
 <defs><marker id="arrowhead" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 Z" fill="#64748b"/></marker></defs>
 <rect x="${minX}" y="${minY}" width="${width}" height="${height}" fill="#fff"/>
 <g>${arrows}</g><g>${[...board.cards].sort((a, b) => a.position.z - b.position.z).map(card => renderCard(board, card)).join('')}</g></svg>`;
 }
 export function downloadBoardSvg(board: Board): void {
-  downloadBlob(new Blob([createBoardSvg(board)], { type: 'image/svg+xml;charset=utf-8' }), `brainstorm-board-${timestamp()}.svg`);
+  downloadBlob(new Blob([createBoardSvg(board)], { type: 'image/svg+xml;charset=utf-8' }), `芽生え-${timestamp()}.svg`);
 }

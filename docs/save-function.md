@@ -70,7 +70,7 @@ SVGには、以下の要素を含める。
 
 初期実装では、次の形式を使用する。
 
-`brainstorm-board-YYYYMMDD-HHmmss.svg`
+`芽生え-YYYYMMDD-HHmmss.svg`
 
 日時は端末のローカル時刻を使用する。
 
@@ -147,7 +147,7 @@ JSONは、後からボードを再構築するためのデータ形式とする�
 
 初期実装では、次の形式を使用する。
 
-`brainstorm-board-YYYYMMDD-HHmmss.json`
+`芽生え-YYYYMMDD-HHmmss.json`
 
 ## 4. JSON読み込み
 

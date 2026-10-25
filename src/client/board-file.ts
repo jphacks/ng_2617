@@ -31,7 +31,7 @@ export async function readBoardFile(file: Pick<File, 'size' | 'text'>): Promise<
 
 export function downloadBoardJson(board: Board): void {
   downloadBlob(new Blob([JSON.stringify(createBoardFile(board))], { type: 'application/json;charset=utf-8' }),
-    `brainstorm-board-${timestamp()}.json`);
+    `芽生え-${timestamp()}.json`);
 }
 
 export function downloadBlob(blob: Blob, filename: string): void {
