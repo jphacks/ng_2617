@@ -10,7 +10,7 @@ export default function Home() {
   const [roomId, setRoomId] = useState('');
   const router = useRouter();
   return <main className="room-entry"><section className="entry-card">
-    <div className="entry-symbol" aria-hidden="true">◈</div><h1>Idea Board</h1>
+    <div className="entry-symbol" aria-hidden="true">◈</div><h1>芽生え</h1>
     <p>ひらめきを置いて、つないで、広げよう。</p>
     <form onSubmit={event => { event.preventDefault(); if (roomId.trim()) router.push(`/room/${encodeURIComponent(roomId.trim())}`); }}>
       <label htmlFor="room-id">ルームID</label>

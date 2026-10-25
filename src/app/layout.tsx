@@ -13,7 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Idea Board — 共同編集ボード",
+  title: "芽生え — 共同編集ボード",
+  applicationName: "芽生え",
   description: "ひらめきを置いて、つないで、広げる共同編集ボード。",
 };
 
