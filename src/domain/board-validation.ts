@@ -1,5 +1,6 @@
 import type { Anchor, Arrow, Board, BoardObjectId, Card, CardId, CardPosition, CardShape } from './board';
 import { CARD_SIZES, MAX_CARD_SIZE, REACTIONS, TIMER_DURATION_MS, objectKey, sameObjectId } from './board.ts';
+import { BOARD_FILE_FORMAT, BOARD_FILE_VERSION, MAX_BOARD_FILE_BYTES, MAX_BOARD_FILE_CARDS, MAX_BOARD_FILE_ARROWS, MAX_BOARD_FILE_COORDINATE, type BoardFile } from './board-file.ts';
 import type { BoardCommand, BoardEvent, CardChange, CardPatch, GenerationState } from './board-protocol';
 
 export function record(value: unknown): value is Record<string, unknown> {
@@ -66,6 +67,19 @@ export function validBoard(v: unknown): v is Board {
     ? keys(v.timer, ['durationMs', 'state', 'remainingMs']) && finite(v.timer.remainingMs) && v.timer.remainingMs >= 0 && v.timer.remainingMs <= TIMER_DURATION_MS
     : v.timer.state === 'running' && keys(v.timer, ['durationMs', 'state', 'endsAt']) && finite(v.timer.endsAt) && v.timer.endsAt >= 0;
 }
+/** ファイルとHTTPコマンドの両方で同じ検証を行う。実行時の属性は受け入れない。 */
+export function validBoardFile(value: unknown): value is BoardFile {
+  if (!record(value) || !keys(value, ['format', 'version', 'cards', 'arrows']) ||
+      value.format !== BOARD_FILE_FORMAT || value.version !== BOARD_FILE_VERSION ||
+      !Array.isArray(value.cards) || value.cards.length > MAX_BOARD_FILE_CARDS ||
+      !Array.isArray(value.arrows) || value.arrows.length > MAX_BOARD_FILE_ARROWS ||
+      value.cards.some(card => !record(card) || 'editingUser' in card || !validCard(card) ||
+        Math.abs(card.position.x) > MAX_BOARD_FILE_COORDINATE || Math.abs(card.position.y) > MAX_BOARD_FILE_COORDINATE)) return false;
+  if (!validBoard({ boardId: 'file', cards: value.cards, arrows: value.arrows,
+    timer: { durationMs: TIMER_DURATION_MS, state: 'stopped', remainingMs: TIMER_DURATION_MS } })) return false;
+  try { return new TextEncoder().encode(JSON.stringify(value)).byteLength <= MAX_BOARD_FILE_BYTES; }
+  catch { return false; }
+}
 export function validPatch(v: unknown): v is CardPatch {
   return record(v) && keys(v, ['shape', 'position', 'color', 'font', 'text', 'relatedIds']) &&
     (v.shape === undefined || validShape(v.shape)) && (v.position === undefined || validPosition(v.position)) &&
@@ -80,7 +94,7 @@ function validChanges(v: unknown): v is CardChange[] {
 export const COMMAND_TYPES = [
   'board.get', 'edit.request', 'edit.commit', 'edit.cancel', 'edit.check.reply', 'card.create', 'objects.delete',
   'board.clear', 'board.restore-sample', 'reaction.add', 'reaction.remove', 'arrow.create', 'arrow.delete',
-  'timer.start', 'timer.stop', 'timer.reset', 'generation.request',
+  'timer.start', 'timer.stop', 'timer.reset', 'generation.request', 'board.import',
 ] as const;
 /** 種類別の境界検証。編集内容と即時操作の属性は混ぜない。 */
 export function validCommand(v: unknown): v is BoardCommand {
@@ -96,6 +110,7 @@ export function validCommand(v: unknown): v is BoardCommand {
     case 'edit.check.reply': return validId(v.lockId) && validId(v.checkId) &&
       (v.state === 'cancelling' ? only('lockId', 'checkId', 'state') :
         (v.state === 'editing' || v.state === 'committing') && only('lockId', 'checkId', 'state', 'changes') && validChanges(v.changes));
+    case 'board.import': return only('file') && validBoardFile(v.file);
     case 'card.create': return only('card') && validCard(v.card) && !v.card.editingUser && v.card.text === '' &&
       (v.card.cardKind === 'word' || (!v.card.relatedIds.length && !v.card.reactions.length));
     case 'objects.delete': return only('objectIds') && validIds(v.objectIds);

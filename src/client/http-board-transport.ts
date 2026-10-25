@@ -1,7 +1,8 @@
 import type { BoardTransport } from './board-client';
 import type { BoardCommand, BoardEvent } from '../domain/board-protocol';
 import { canonical } from '../domain/board-protocol.ts';
-import { validEvent } from '../domain/board-validation.ts';
+import { record, validEvent } from '../domain/board-validation.ts';
+import { BoardRequestRejectedError } from './board-transport-error.ts';
 
 type EventSourceConnection = Pick<EventSource, 'onmessage' | 'onerror' | 'onopen' | 'close'>;
 type Subscription = {
@@ -71,14 +72,20 @@ export function createHttpBoardTransport(fetcher: typeof fetch = fetch,
           headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(command),
         });
         const value: unknown = await response.json();
+        if (command.type === 'board.import' && response.status === 503 && record(value) &&
+            value.code === 'SERVER_RESTART_REQUIRED' && typeof value.error === 'string' && value.error.length <= 1000) {
+          throw new BoardRequestRejectedError(value.error);
+        }
         if (validEvent(value) && matchesCommand(value, command) &&
             (response.ok || (value.type === 'command.rejected' && [400, 403, 404, 409].includes(response.status)))) {
           if (subscription === current) current.receive(value);
           return;
         }
-        throw new Error(!response.ok ? `要求を確認できませんでした（${response.status}）。元の要求を再送できます。`
+        const reason = record(value) && typeof value.error === 'string' && value.error.length <= 1000 ? ` ${value.error}` : '';
+        throw new Error(!response.ok ? `要求を確認できませんでした（${response.status}）。${reason} 元の要求を再送できます。`
           : 'サーバーの応答が要求と一致しません。');
       } catch (error) {
+        if (subscription === current && error instanceof BoardRequestRejectedError) throw error;
         if (subscription === current) throw new Error(controller.signal.aborted
           ? '応答がタイムアウトしました。元の要求を再送できます。' : error instanceof Error ? error.message : '通信に失敗しました。');
       } finally { clearTimeout(timeout); current.pending.delete(controller); }
