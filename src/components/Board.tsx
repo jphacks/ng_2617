@@ -26,10 +26,27 @@ import { MatchingGame } from './MatchingGame';
 const nodeTypes = { card: BoardCard };
 const COLORS = ['#FFF0A8', '#FFDCE5', '#D9E9FF', '#DDF5D7', '#EADFFF', '#FFFFFF'];
 const COLOR_NAMES = ['黄色', 'ピンク', '青', '緑', '紫', '白'];
-type Tool = 'select' | 'range' | 'note' | 'arrow' | 'reaction';
-const TOOLS: readonly [Tool, string, string][] = [
-  ['select', '↖', '選択・移動'], ['range', '⬚', '範囲選択'], ['note', '▤', '付箋を追加'], ['arrow', '↗', '矢印で接続'], ['reaction', '☺', 'リアクション'],
+type Tool = 'select' | 'range' | 'note' | 'arrow';
+const TOOLS: readonly [Tool, string][] = [
+  ['select', '選択・移動'], ['range', '範囲選択'], ['note', '付箋を追加'], ['arrow', '矢印で接続'],
 ];
+
+function ToolIcon({ name }: { name: Tool | 'delete' }) {
+  return <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    {name === 'select' && <path d="M4 3V19L8.5 14.5L12 21L15 19.5L11.5 13H18L4 3Z" />}
+    {name === 'range' && <rect x="4" y="4" width="16" height="16" rx="1" strokeDasharray="3 3" />}
+    {name === 'note' && <>
+      <path d="M14 21H5A2 2 0 0 1 3 19V5A2 2 0 0 1 5 3H19A2 2 0 0 1 21 5V14L14 21Z" />
+      <path d="M14 21V14H21M9 6V12M6 9H12" />
+    </>}
+    {name === 'arrow' && <>
+      <circle cx="4" cy="18" r="2" /><circle cx="20" cy="6" r="2" />
+      <path d="M6 18H10A3 3 0 0 0 13 15V9A3 3 0 0 1 16 6H18M15 3L18 6L15 9" />
+    </>}
+    {name === 'delete' && <path d="M4 7H20M9 7V4H15V7M7 7L8 20H16L17 7M10 10V17M14 10V17" />}
+  </svg>;
+}
 
 export function Board({ boardId }: { boardId: string }) {
   const [client, setClient] = useState<BoardClient | null>(null);
@@ -246,7 +263,6 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
     : edit.phase === 'cancelling' ? '取消の確定を待っています…' : '空白をタップ / Ctrl・⌘＋Enterで確定 · Escapeで取消 · Enterで改行';
   else if (tool === 'note') guide = 'キャンバスをタップして付箋を配置';
   else if (tool === 'arrow') guide = 'カードの辺の点から別のカードの点へドラッグして接続';
-  else if (tool === 'reaction') guide = '関連カードをクリックして「いいね」を切り替え';
   else if (tool === 'range') guide = 'ドラッグで範囲選択 · ゴミ箱 / Deleteで削除';
 
   return <BoardContext.Provider value={{ client, state, relatedTarget: relatedActive ? relatedTarget : null, editingEnabled: tool === 'select', startRelated, selectRelated }}>
@@ -275,10 +291,6 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
         onNodeClick={(event, node) => {
           if (event.target instanceof Element && event.target.closest('button,input,select')) return;
           if (relatedActive) selectRelated(node.data.card.cardId);
-          else if (tool === 'reaction' && node.data.card.cardKind === 'block') {
-            const card = node.data.card; const own = card.reactions.some(r => r.reactionId === 'thumbs-up' && r.userId === state.identity.userId);
-            client.execute({ type: own ? 'reaction.remove' : 'reaction.add', cardId: card.cardId, reactionId: 'thumbs-up' });
-          }
         }}
         nodesConnectable={ready && (tool === 'arrow' || tool === 'select') && !relatedActive} connectionMode={ConnectionMode.Loose}
         elementsSelectable={!relatedActive && (tool === 'select' || tool === 'range')} selectionOnDrag={tool === 'range'}
@@ -293,11 +305,11 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
         <span className={`connection-dot ${ready ? 'connected' : ''}`} title={ready ? '同期中' : '未接続'} />
       </header>
       <nav className="board-toolbar panel" aria-label="ボードのツール">
-        {TOOLS.map(([value, icon, label]) => <button key={value} type="button" className={tool === value ? 'active' : ''}
+        {TOOLS.map(([value, label]) => <button key={value} type="button" className={tool === value ? 'active' : ''}
           title={label} aria-label={label} aria-pressed={tool === value} disabled={!ready}
-          onClick={() => { setTool(value); setNoteOptions(value === 'note' ? !noteOptions : false); }}><span aria-hidden="true">{icon}</span></button>)}
+          onClick={() => { setTool(value); setNoteOptions(value === 'note' ? !noteOptions : false); }}><ToolIcon name={value} /></button>)}
         <hr /><button type="button" aria-label="選択したカード・矢印を削除" title="選択したカード・矢印を削除" disabled={!ready || !selection.size} onClick={deleteSelected}>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7H20M9 7V4H15V7M7 7L8 20H16L17 7M10 10V17M14 10V17" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>
+          <ToolIcon name="delete" />
         </button>
       </nav>
       {noteOptions && <aside className="note-options panel">
