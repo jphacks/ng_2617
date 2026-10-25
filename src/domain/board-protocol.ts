@@ -1,3 +1,4 @@
+import type { BoardFile } from './board-file';
 import type { Arrow, ArrowId, Board, BoardObjectId, Card, CardId, BlockCard, WordCard, CardShape, CardPosition, RelationLevel } from './board';
 import { objectKey } from './board.ts';
 
@@ -22,6 +23,7 @@ export type EditCommand = Request & (
 export type ImmediateCommand = Request & (
   | { type: 'card.create'; card: Card }
   | { type: 'objects.delete'; objectIds: readonly BoardObjectId[] }
+  | { type: 'board.import'; file: BoardFile }
   | { type: 'board.clear' | 'board.restore-sample' }
   | { type: 'reaction.add' | 'reaction.remove'; cardId: CardId; reactionId: string }
   | { type: 'arrow.create'; arrow: Arrow }

@@ -1,5 +1,5 @@
 import type { Board, BoardObjectId, Card, CardId, RelationLevel } from '../domain/board';
-import { createBoard, createSample, getCard, isEmpty, objectKey, removeObjects, sameObjectId, TIMER_DURATION_MS } from '../domain/board.ts';
+import { createBoard, createSample, getCard, isEmpty, objectKey, removeObjects, sameObjectId, newCardId, newArrowId, TIMER_DURATION_MS } from '../domain/board.ts';
 import type { BoardCommand, BoardEvent, CardChange, ClientIdentity, EditCommand, GenerationState, SnapshotData } from '../domain/board-protocol';
 import { canonical, commandFingerprint } from '../domain/board-protocol.ts';
 import { arrowConnectionKey, validBoard, validCard, validCommand, validId } from '../domain/board-validation.ts';
@@ -10,7 +10,7 @@ import { onTimerFinished } from './board-timer.ts';
 
 export type EditResult = { status: number; body: BoardEvent | { error: string } };
 export type UpdateKind = 'edit-requested' | 'edit-committed' | 'edit-cancelled' | 'edit-saved' | 'edit-released' |
-  'card-created' | 'objects-deleted' | 'sample-restored' | 'reaction-changed' | 'arrow-created' | 'auto-generated' | 'timer';
+  'card-created' | 'objects-deleted' | 'sample-restored' | 'reaction-changed' | 'arrow-created' | 'auto-generated' | 'board-imported' | 'timer';
 export type BoardUpdate = Readonly<{ boardId: string; objectIds: readonly BoardObjectId[]; kind: UpdateKind; revision: number }>;
 type Lock = {
   cardIds: readonly CardId[]; userId: string; clientId: string; lockId: string; expiresAt: number; generation: number;
@@ -114,12 +114,12 @@ export function createBoardService(initialBoards: readonly Board[], options: {
     }, lockTtlMs);
   }
   function waitForAddition(entry: Entry) {
-    if (disposed || entry.locks.size || !entry.lastUpdate) return;
+    if (disposed || entry.locks.size || !entry.lastUpdate || entry.lastUpdate.kind === 'board-imported') return;
     const version = entry.cardVersion;
     entry.cancelAddition = schedule(() => {
       if (disposed || entry.cardVersion !== version) return;
       entry.cancelAddition = undefined;
-      if (entry.locks.size || isEmpty(entry.board) || entry.lastUpdate?.kind === 'auto-generated' || entry.generating) return;
+      if (entry.locks.size || isEmpty(entry.board) || (entry.lastUpdate?.kind === 'auto-generated' || entry.lastUpdate?.kind === 'board-imported') || entry.generating) return;
       startGeneration(entry, 'mid', 'automatic');
     }, Math.max(0, entry.lastUpdate.at + additionDelayMs - now()));
   }
@@ -305,6 +305,25 @@ export function createBoardService(initialBoards: readonly Board[], options: {
       case 'objects.delete': return deleteObjects(entry, command, command.objectIds);
       case 'arrow.delete': return deleteObjects(entry, command, [command.arrowId]);
       case 'board.clear': return deleteObjects(entry, command, [...entry.board.cards.map(c => c.cardId), ...entry.board.arrows.map(a => a.arrowId)]);
+      case 'board.import': {
+        if (entry.locks.size) return reject(entry, command, 409, '編集中のカードがあるため読み込めません。全員の編集完了後にもう一度お試しください。');
+        // 全体を検証済み。IDの再割り当てと参照の再接続を終えてから1回で公開する。
+        const ids = new Map(command.file.cards.map(card => [objectKey(card.cardId), newCardId()]));
+        const cards: Card[] = command.file.cards.map(card => ({ ...structuredClone(card),
+          cardId: ids.get(objectKey(card.cardId))!,
+          ...(card.cardKind === 'block' && { relatedIds: card.relatedIds.map(id => ids.get(objectKey(id))!) }),
+        }));
+        const arrows = command.file.arrows.map(arrow => ({ ...arrow, arrowId: newArrowId(),
+          sourceCardId: ids.get(objectKey(arrow.sourceCardId))!, targetCardId: ids.get(objectKey(arrow.targetCardId))!,
+        }));
+        const affected = [...entry.board.cards.map(c => c.cardId), ...entry.board.arrows.map(a => a.arrowId),
+          ...cards.map(c => c.cardId), ...arrows.map(a => a.arrowId)];
+        entry.board = { ...entry.board, cards, arrows };
+        // 生成中の古い結果はcardVersionで破棄し、読み込みを起点とする待機は作らない。
+        onBoardUpdated(entry, 'board-imported', affected, { type: 'command.accepted', clientId: command.clientId,
+          requestId: command.requestId, commandType: command.type, changed: true }, command.userId);
+        return accepted(entry, command, true);
+      }
       case 'board.restore-sample': {
         if (entry.locks.size) return reject(entry, command, 409, '編集中のカードがあるため、サンプルへ戻せません。');
         const sample = createSample(entry.board.boardId);
@@ -383,6 +402,7 @@ export function createBoardService(initialBoards: readonly Board[], options: {
   }
   initialBoards.forEach(addBoard);
   return {
+    supportsBoardImport: true,
     getBoardSnapshot(boardId: string) { const entry = boards.get(boardId); return entry && !disposed ? snapshot(entry) : undefined; },
     ensureBoard(boardId: string) {
       if (disposed || !validId(boardId)) return false;

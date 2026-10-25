@@ -5,6 +5,7 @@ import { getCard, objectKey, sameObjectId } from '../domain/board.ts';
 import type { BoardCommand, BoardEvent, CardChange, CardContent, CardPatch, ClientIdentity, GenerationState, ImmediateOperation } from '../domain/board-protocol';
 import { cardContent, contentPatch } from '../domain/board-protocol.ts';
 import { validPatch } from '../domain/board-validation.ts';
+import { BoardRequestRejectedError } from './board-transport-error.ts';
 
 export interface BoardTransport {
   send(command: BoardCommand): void | Promise<void>;
@@ -19,8 +20,9 @@ type Session = Readonly<{
   finalChanges?: readonly CardChange[];
 }>;
 export type EditState = Readonly<{ phase: 'idle' }> | Session;
+export type ImportState = Readonly<{ status: 'idle' }> | Readonly<{ status: 'pending' | 'succeeded' | 'rejected'; requestId: string; message?: string }>;
 export type BoardClientState = Readonly<{
-  identity: ClientIdentity; status: 'offline' | 'loading' | 'ready'; board: Board | null; revision: number;
+  importState: ImportState; identity: ClientIdentity; status: 'offline' | 'loading' | 'ready'; board: Board | null; revision: number;
   edit: EditState; error: string | null; generation: GenerationState; generationSequence: number;
   generatedCardIds: readonly CardId[]; pendingCommands: readonly BoardCommand[]; serverOffsetMs: number;
 }>;
@@ -28,7 +30,7 @@ export type BoardClientState = Readonly<{
 /** 1端末の確定状態・許可待ちの仮表示・許可済み下書きを分離する。 */
 export function createBoardClient(identity: ClientIdentity, transport: BoardTransport, createRequestId = () => randomUUID()) {
   let state: BoardClientState = {
-    identity: { ...identity }, status: 'offline', board: null, revision: -1, edit: { phase: 'idle' }, error: null,
+    importState: { status: 'idle' }, identity: { ...identity }, status: 'offline', board: null, revision: -1, edit: { phase: 'idle' }, error: null,
     generation: { status: 'idle' }, generationSequence: -1, generatedCardIds: [], pendingCommands: [], serverOffsetMs: 0,
   };
   const listeners = new Set<() => void>();
@@ -46,10 +48,13 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
     state = { ...state, ...update, pendingCommands: [...pending.values()].map(command => structuredClone(command)) };
     listeners.forEach(listener => listener());
   }
+  function retainImport() {
+    for (const [id, command] of pending) if (command.type !== 'board.import') pending.delete(id);
+  }
   function offline(reason: string | null) {
     active = false; connectionGeneration++;
     unsubscribe?.(); unsubscribe = undefined;
-    pending.clear(); answeredChecks.clear(); buffered.length = 0;
+    retainImport(); answeredChecks.clear(); buffered.length = 0;
     publish({ status: 'offline', edit: { phase: 'idle' }, error: reason, generatedCardIds: [] });
   }
   function send(command: BoardCommand) {
@@ -57,6 +62,11 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
     if (command.type !== 'board.get') pending.set(command.requestId, structuredClone(command));
     const failed = (error: unknown) => {
       if (!active || connectionGeneration !== generation || (command.type !== 'board.get' && !pending.has(command.requestId))) return;
+      if (command.type === 'board.import' && error instanceof BoardRequestRejectedError) {
+        pending.delete(command.requestId);
+        publish({ importState: { status: 'rejected', requestId: command.requestId, message: error.message }, error: error.message });
+        return;
+      }
       // HTTP失敗は拒否・切断ではない。SSEと確定/取消の最終内容を残す。
       publish({ error: error instanceof Error ? error.message : '応答を確認できません。元の要求を再送できます。' });
     };
@@ -136,9 +146,14 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
     if (initializing || value.serverNow > lastServerTime) { lastServerTime = value.serverNow; serverOffsetMs = value.serverNow - Date.now(); }
     let edit = state.edit;
     let error = state.error;
+    let importState = state.importState;
     const ownReply = 'requestId' in value && value.clientId === identity.clientId;
     const pendingCommand = ownReply ? pending.get(value.requestId) : undefined;
     if (ownReply) pending.delete(value.requestId);
+    if (pendingCommand?.type === 'board.import') {
+      if (value.type === 'command.accepted') importState = { status: 'succeeded', requestId: value.requestId, message: 'ボードを読み込みました。' };
+      if (value.type === 'command.rejected') importState = { status: 'rejected', requestId: value.requestId, message: value.reason };
+    }
     const matches = ownReply && edit.phase !== 'idle' && (value.requestId === edit.requestId || value.requestId === edit.acquisitionRequestId);
     let finishAfterGrant = false;
     if (value.type === 'edit.granted' && matches && edit.phase === 'requesting' && sameIds(value.cardIds, edit.cardIds)) {
@@ -161,6 +176,8 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
       edit = { phase: 'idle' }; error = '期限確認への応答が届かなかったため、編集権が解除されました。';
     } else if (value.type === 'command.accepted' && pendingCommand) error = null;
 
+    // 読み込みで消えたIDに対する取得待ち・保存待ちも終了する。
+    if (edit.phase !== 'idle' && edit.cardIds.some(id => !getCard(board!, id))) edit = { phase: 'idle' };
     // 最新の確定属性へ下書きを重ねる。サーバーで除去された関連先は復活させない。
     if (edit.phase === 'editing' && !finishAfterGrant) {
       const currentEdit = edit;
@@ -196,12 +213,13 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
         }
       }
     }
-    publish({ status: 'ready', board, revision, edit, error, generation, generationSequence, generatedCardIds, serverOffsetMs });
+    publish({ importState, status: 'ready', board, revision, edit, error, generation, generationSequence, generatedCardIds, serverOffsetMs });
     if (finishAfterGrant) complete();
     if (value.type === 'edit.check') answerCheck(value);
     if (initializing) {
       const initialRevision = value.revision;
       const queued = buffered.splice(0);
+      for (const command of [...pending.values()]) if (command.type === 'board.import') send(command);
       for (const queuedEvent of queued) {
         // 初期スナップショットに含まれる過去の生成は案内しない。
         if (queuedEvent.type === 'board.cards-generated' && queuedEvent.revision <= initialRevision) seenGenerationEvents.add(queuedEvent.eventId);
@@ -212,7 +230,7 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
   function connect() {
     if (active) return;
     active = true; const generation = ++connectionGeneration;
-    pending.clear(); answeredChecks.clear(); seenGenerationEvents.clear(); buffered.length = 0;
+    retainImport(); answeredChecks.clear(); seenGenerationEvents.clear(); buffered.length = 0;
     publish({ status: 'loading', edit: { phase: 'idle' }, error: null, generatedCardIds: [] });
     try {
       const stop = transport.subscribe(value => { if (active && generation === connectionGeneration) receive(value); },
@@ -227,7 +245,7 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     connect, disconnect: () => offline(null),
     requestEdit(ids: CardId | readonly CardId[], mode: 'text' | 'transform' = 'text'): boolean {
-      if (state.status !== 'ready' || state.edit.phase !== 'idle' || !state.board) return false;
+      if (state.status !== 'ready' || state.importState.status === 'pending' || state.edit.phase !== 'idle' || !state.board) return false;
       const cardIds = Array.isArray(ids) ? ids : [ids as CardId];
       if (!cardIds.length || new Set(cardIds.map(objectKey)).size !== cardIds.length) return false;
       const bases: Record<string, CardContent> = {};
@@ -269,8 +287,11 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
       return true;
     },
     execute(operation: ImmediateOperation): boolean {
-      if (state.status !== 'ready') return false;
-      send({ ...structuredClone(operation), ...identity, requestId: createRequestId() } as BoardCommand); publish({});
+      if (state.status !== 'ready' || state.importState.status === 'pending') return false;
+      if (operation.type === 'board.import' && (state.edit.phase !== 'idle' || pending.size > 0)) return false;
+      const requestId = createRequestId();
+      if (operation.type === 'board.import') publish({ importState: { status: 'pending', requestId }, error: null });
+      send({ ...structuredClone(operation), ...identity, requestId } as BoardCommand); publish({});
       return true;
     },
     retryPending() { for (const command of [...pending.values()]) send(command); },

@@ -131,3 +131,13 @@ button { color: inherit; }
   .entry-card { padding: 28px; }
 }
 @media (prefers-reduced-motion: reduce) { .generation-message.running { animation: none; } }
+
+.file-message { position: absolute; z-index: 24; top: 142px; left: 50%; transform: translateX(-50%); max-width: min(90vw, 650px); padding: 10px 14px; font-size: 12px; }
+.file-message[role="alert"] { color: #9a4130; border-color: #e2a99e; }
+.import-dialog { width: min(480px, 90vw); max-height: 85dvh; overflow: auto; margin: auto; padding: 24px; font-size: 13px; line-height: 1.8; }
+.import-dialog::backdrop { background: #17203366; }
+.import-dialog h2 { font-size: 18px; font-weight: 700; margin: 0 0 14px; }
+.import-dialog p { margin: 12px 0; }
+.import-filename { overflow-wrap: anywhere; font-weight: 600; }
+.import-dialog-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 20px; }
+.import-dialog-actions > button:not(.primary) { border: 1px solid #ccd3dd; border-radius: 8px; background: white; padding: 9px 15px; }

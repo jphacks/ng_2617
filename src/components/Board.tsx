@@ -14,7 +14,10 @@ import { generatedGuidance } from '@/client/generated-guidance';
 import { CARD_SIZES, createEmptyCard, newArrowId, objectKey, getCard, sameObjectId, type BoardObjectId, type Card, type CardId, type RelationLevel } from '@/domain/board';
 import { validAnchor } from '@/domain/board-validation';
 import { BoardCard, BoardContext, previewCard, type BoardNode } from './BoardCard';
-import { downloadBoardJson } from '@/client/board-file';
+import { ImportBoardDialog } from './ImportBoardDialog';
+import { BoardNotice } from './BoardNotice';
+import type { BoardFile } from '@/domain/board-file';
+import { downloadBoardJson, readBoardFile } from '@/client/board-file';
 import { downloadBoardSvg } from '@/client/board-svg';
 
 const nodeTypes = { card: BoardCard };
@@ -55,6 +58,11 @@ function BoardCanvas({ client }: { client: BoardClient }) {
   const [level, setLevel] = useState<RelationLevel>('mid');
   const [selectedIds, setSelection] = useState<Set<string>>(new Set());
   const [relatedCandidate, setRelatedTarget] = useState<CardId | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const fileReadVersion = useRef(0);
+  const [candidate, setCandidate] = useState<{ name: string; file: BoardFile } | null>(null);
+  const [fileMessage, setFileMessage] = useState<{ error: boolean; text: string } | null>(null);
+  const [readingFile, setReadingFile] = useState(false);
   const [clock, setClock] = useState(0);
   const pointer = useRef<{ x: number; y: number; at: number; moved: boolean } | null>(null);
   const ready = state.status === 'ready';
@@ -105,6 +113,38 @@ function BoardCanvas({ client }: { client: BoardClient }) {
     if (visible.length) client.dismissGuidance(visible);
   }, [client, guides]);
 
+  const importPending = state.importState.status === 'pending';
+  const fileBusy = !ready || editing || importPending || readingFile || state.pendingCommands.length > 0;
+  const syncError = state.importState.status === 'rejected' && state.error === state.importState.message ? null : state.error;
+  function exportFile(kind: 'json' | 'svg') {
+    if (!board || fileBusy) return;
+    try {
+      if (kind === 'json') downloadBoardJson(board); else downloadBoardSvg(board);
+      setFileMessage({ error: false, text: `${kind.toUpperCase()}ファイルを出力しました。` });
+      setMenu(false);
+    } catch (error) {
+      setFileMessage({ error: true, text: error instanceof Error ? error.message : 'ファイルを出力できませんでした。' });
+    }
+  }
+  async function selectFile(file: File | undefined) {
+    if (!file) return;
+    const version = ++fileReadVersion.current;
+    setReadingFile(true); setFileMessage(null); setMenu(false);
+    try {
+      const parsed = await readBoardFile(file);
+      if (fileReadVersion.current === version) setCandidate({ name: file.name, file: parsed });
+    } catch (error) {
+      if (fileReadVersion.current === version) setFileMessage({ error: true,
+        text: error instanceof Error ? error.message : 'ファイルを読み込めませんでした。' });
+    } finally { if (fileReadVersion.current === version) setReadingFile(false); }
+  }
+  function confirmImport() {
+    if (!candidate) return;
+    if (!client.execute({ type: 'board.import', file: candidate.file })) {
+      setFileMessage({ error: true, text: '編集や送信が完了し、接続が戻ってから再度読み込んでください。' });
+    } else setFileMessage(null);
+    setCandidate(null);
+  }
   function focusCard(id: CardId) { document.getElementById(`text-${id.uuid}`)?.focus(); }
   function startRelated(id: CardId) {
     const current = client.getSnapshot().edit;
@@ -130,7 +170,7 @@ function BoardCanvas({ client }: { client: BoardClient }) {
   // キー削除とゴミ箱は同じ操作を使用する。入力欄のBackspaceは文字削除。
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.isComposing || event.keyCode === 229) return;
+      if (event.isComposing || event.keyCode === 229 || (event.target instanceof Element && event.target.closest('dialog'))) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         if (relatedTarget) { const target = relatedTarget; setRelatedTarget(null); focusCard(target); }
@@ -262,36 +302,28 @@ function BoardCanvas({ client }: { client: BoardClient }) {
         </div>
         <button className="menu-toggle panel" type="button" aria-label="メニュー" aria-expanded={menu} onClick={() => setMenu(!menu)}>☰</button>
         {menu && <div className="board-menu panel">
-          <button
-            type="button"
-            disabled={!ready || !board || editing || state.pendingCommands.length > 0}
-            onClick={() => {
-              if (!board || editing || state.pendingCommands.length > 0) return;
-              downloadBoardJson(board);
-              setMenu(false);
-            }}
-          >
-            JSONで保存
-          </button>
-          <button
-            type="button"
-            disabled={!ready || !board || editing || state.pendingCommands.length > 0}
-            onClick={() => {
-              if (!board || editing || state.pendingCommands.length > 0) return;
-
-              downloadBoardSvg(board);
-              setMenu(false);
-            }}
-          >
-            SVGで出力
-          </button>
+          <button type="button" disabled={fileBusy || !board} onClick={() => exportFile('json')}>JSONで保存</button>
+          <button type="button" disabled={fileBusy || !board} onClick={() => exportFile('svg')}>SVGで出力</button>
+          <button type="button" disabled={fileBusy} onClick={() => fileInput.current?.click()}>JSONを読み込む</button>
           <button type="button" disabled={!ready} onClick={() => { client.execute({ type: 'board.clear' }); setMenu(false); }}>キャンバスをクリア</button>
           <button type="button" disabled={!ready} onClick={() => { client.execute({ type: 'board.restore-sample' }); setMenu(false); }}>サンプルに戻す</button>
           <button type="button" onClick={() => { setHelp(!help); setMenu(false); }}>操作ガイド</button>
         </div>}
       </div>
-      {(state.error || !ready || state.pendingCommands.length > 0) && <div className="sync-message panel" role={state.error ? 'alert' : 'status'}>
-        <span>{state.error || (ready ? `${state.pendingCommands.length}件の応答を確認中…` : state.status === 'loading' ? 'サーバーに接続中…' : '接続が切れています。')}</span>
+      <input ref={fileInput} type="file" accept=".json,application/json" aria-label="読み込むボードのJSONファイル" hidden
+        onChange={event => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; void selectFile(file); }} />
+      {candidate && <ImportBoardDialog candidate={candidate} onCancel={() => setCandidate(null)} onConfirm={confirmImport} />}
+      {fileMessage && <BoardNotice noticeId={fileMessage} persistent={fileMessage.error}
+        className="file-message panel" role={fileMessage.error ? 'alert' : 'status'}>{fileMessage.text}</BoardNotice>}
+      {!fileMessage && readingFile && <div className="file-message panel" role="status">ファイルを確認中…</div>}
+      {state.importState.status !== 'idle' && <BoardNotice
+        noticeId={`import:${state.importState.requestId}:${state.importState.status}`}
+        persistent={state.importState.status !== 'succeeded'} hidden={!!fileMessage || readingFile || !!candidate}
+        className="file-message panel" role={state.importState.status === 'rejected' ? 'alert' : 'status'}>
+        {state.importState.status === 'pending' ? '読み込み結果を確認中です。通信が切れた場合も元の要求で再確認します。' : state.importState.message}
+      </BoardNotice>}
+      {(syncError || !ready || state.pendingCommands.length > 0) && <div className="sync-message panel" role={syncError ? 'alert' : 'status'}>
+        <span>{syncError || (ready ? `${state.pendingCommands.length}件の応答を確認中…` : state.status === 'loading' ? 'サーバーに接続中…' : '接続が切れています。')}</span>
         {state.status === 'offline' && <button type="button" onClick={client.connect}>再接続</button>}
         {ready && state.error && state.pendingCommands.length > 0 && <button type="button" onClick={client.retryPending}>元の要求を再送</button>}
       </div>}
@@ -314,9 +346,11 @@ function BoardCanvas({ client }: { client: BoardClient }) {
         <button type="button" className="primary generate-button" disabled={!ready || generating} onClick={() => client.execute({ type: 'generation.request', level })}>{generating ? '候補を生成中…' : '単語を生成'}</button>
         <small className="muted">現在はモックの候補語を使用しています。</small>
       </aside>}
-      {state.generation.status !== 'idle' && <div className={`generation-message panel ${state.generation.status}`} role="status">
+      {state.generation.status !== 'idle' && <BoardNotice noticeId={`generation:${state.generation.generationId}:${state.generation.status}`}
+        persistent={state.generation.status === 'running' || state.generation.status === 'failed'}
+        className={`generation-message panel ${state.generation.status}`} role={state.generation.status === 'failed' ? 'alert' : 'status'}>
         {state.generation.status === 'running' ? '✦ ボードから候補語を生成中…' : state.generation.message}
-      </div>}
+      </BoardNotice>}
       {help && <aside className="help-panel panel"><div className="panel-title"><strong>操作ガイド</strong><button type="button" aria-label="ガイドを閉じる" onClick={() => setHelp(false)}>×</button></div>
         <p>本文欄をクリックして編集。Enterで改行、空白をタップかCtrl / ⌘＋Enterで確定、Escapeで取消します。</p>
         <p>上部のつまみで移動。Shiftで複数選択し、まとめて移動できます。選択したカードの四隅でサイズを変更します。</p>
