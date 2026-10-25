@@ -10,4 +10,4 @@ const service = createBoardService([{
   }],
 }]);
 
-export const { getBoardSnapshot, executeEdit, requestEdit, commitEdit, cancelEdit } = service;
+export const { getBoardSnapshot, executeEdit, requestEdit, commitEdit, cancelEdit, createBoard } = service;

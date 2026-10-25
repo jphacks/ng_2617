@@ -1,5 +1,5 @@
 import { connection } from 'next/server';
-import { getBoardSnapshot, executeEdit } from '@/server/board-store';
+import { getBoardSnapshot, executeEdit, createBoard } from '@/server/board-store';
 
 export async function GET(
   _request: Request,
@@ -7,10 +7,11 @@ export async function GET(
 ) {
   await connection();
   const { boardId } = await params;
-  const snapshot = getBoardSnapshot(boardId);
+  let snapshot = getBoardSnapshot(boardId);
   const headers = { 'Cache-Control': 'no-store' };
+  // ボードが存在しない場合は自動作成
   if (!snapshot) {
-    return Response.json({ error: 'ボードが見つかりません。' }, { status: 404, headers });
+    snapshot = createBoard(boardId);
   }
   return Response.json(snapshot, { headers });
 }

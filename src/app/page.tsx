@@ -1,114 +1,145 @@
-'use client';
+"use client";
 
-import { useEffect, useState, useRef } from 'react';
-import { ReactFlow, Background, Controls } from '@xyflow/react';
-import '@xyflow/react/dist/style.css';
-import { createBoardClient, type BoardClientState, type BoardClient } from '@/client/board-client';
-import { createHttpBoardTransport } from '@/client/http-board-transport';
-import { useIdleHeartbeat } from '@/hooks/useIdleHeartbeat';
+import { useState } from "react";
+import { useRouter } from "next/navigation";
 
 export default function Home() {
-  const [state, setState] = useState<BoardClientState | null>(null);
-  const [request, setRequest] = useState(0);
-  const clientRef = useRef<BoardClient | null>(null);
+  const [roomId, setRoomId] = useState("");
+  const router = useRouter();
 
-  useEffect(() => {
-    const client = createBoardClient({
-      boardId: 'demo', userId: 'demo-user', clientId: crypto.randomUUID(),
-    }, createHttpBoardTransport());
-    clientRef.current = client;
-    const unsubscribe = client.subscribe(() => setState(client.getSnapshot()));
-    client.connect();
-    return () => {
-      unsubscribe();
-      client.disconnect();
-      clientRef.current = null;
-    };
-  }, [request]);
-
-  useIdleHeartbeat({
-    client: clientRef.current,
-    timeoutSeconds: 30,
-    heartbeatIntervalSeconds: 60,
-  });
-
-  // --- 【タイマー＆演出担当の統合部分】 ---
-  const nodes = state?.board?.cards.map((card) => {
-    // レベル（low / mid / high）に応じたアニメーションとスタイルの切り替え
-    let animationClass = '';
-    let badgeText = '';
-    let borderColor = card.color || '#e5e7eb';
-    let bgColor = '#ffffff';
-
-    // 仮に card に level プロパティがある、またはサーバーから渡ってくる場合の分岐
-    // ※ 実際のプロパティ名（例: card.level や card.relationLevel など）に合わせて調整してください
-    const level = (card as any).level || 'mid'; 
-
-    if (level === 'low') {
-      animationClass = 'animate-storm';
-      badgeText = '🌪️ ストーム (台風)';
-      borderColor = '#60a5fa'; // 青系
-      bgColor = '#eff6ff';
-    } else if (level === 'high') {
-      animationClass = 'animate-supply';
-      badgeText = '📦 補給物資';
-      borderColor = '#f59e0b'; // オレンジ系
-      bgColor = '#fffbeb';
-    } else {
-      animationClass = 'transition-all duration-300';
+  const handleJoin = () => {
+    const trimmedRoomId = roomId.trim();
+    if (trimmedRoomId) {
+      router.push(`/room/${encodeURIComponent(trimmedRoomId)}`);
     }
+  };
 
-    return {
-      id: card.cardId,
-      type: 'default',
-      data: {
-        label: (
-          <div 
-            className={`p-3 rounded-lg shadow-md border-2 ${animationClass}`}
-            style={{ backgroundColor: bgColor, borderColor: borderColor }}
-          >
-            {badgeText && (
-              <div className="text-[10px] font-bold text-gray-500 mb-1">
-                {badgeText}
-              </div>
-            )}
-            <div className="font-semibold text-gray-800 text-sm" style={{ fontFamily: card.font }}>
-              {card.text}
-            </div>
-          </div>
-        ),
-      },
-      position: { x: card.position.x, y: card.position.y },
-    };
-  }) ?? [];
-  // ----------------------------------------
-
-  const loading = !state || state.status === 'loading';
+  const handleKeyDown = (event: React.KeyboardEvent) => {
+    if (event.key === "Enter") {
+      handleJoin();
+    }
+  };
 
   return (
-    <main style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      <header style={{ padding: '12px 20px', display: 'flex', gap: 16, alignItems: 'center' }}>
-        <span role="status">
-          {loading ? 'サーバーから取得中…' : state.status === 'ready'
-            ? `ボード取得済み：${state.board?.boardId}（${nodes.length}枚）`
-            : 'ボードを取得できませんでした'}
-        </span>
-        <button type="button" disabled={loading} onClick={() => setRequest((value) => value + 1)}
-          style={{ border: '1px solid currentColor', borderRadius: 6, padding: '4px 12px', cursor: 'pointer' }}>
-          再取得
+    <div
+      style={{
+        height: "100vh",
+        width: "100vw",
+        background: "#f7f9fc",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        fontFamily:
+          'Inter, "Noto Sans JP", -apple-system, BlinkMacSystemFont, sans-serif',
+      }}
+    >
+      <div
+        style={{
+          background: "#fff",
+          padding: "48px 64px",
+          borderRadius: 16,
+          boxShadow: "0 8px 32px #00000010",
+          maxWidth: 480,
+          width: "100%",
+        }}
+      >
+        <h1
+          style={{
+            fontSize: 28,
+            fontWeight: 700,
+            color: "#111", // 少し濃くしました
+            marginBottom: 12,
+            textAlign: "center",
+          }}
+        >
+          ブレインストーミング ボード
+        </h1>
+        <p
+          style={{
+            fontSize: 14,
+            color: "#555", // 少し濃くしました
+            marginBottom: 32,
+            textAlign: "center",
+          }}
+        >
+          ルームIDを入力して共同編集を開始
+        </p>
+
+        <div style={{ marginBottom: 24 }}>
+          <label
+            style={{
+              display: "block",
+              fontSize: 13,
+              fontWeight: 600,
+              color: "#222", // ラベルを濃くしました
+              marginBottom: 8,
+            }}
+          >
+            ルームID
+          </label>
+          <input
+            type="text"
+            value={roomId}
+            onChange={(e) => setRoomId(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="例: my-room-123"
+            style={{
+              width: "100%",
+              padding: "12px 16px",
+              border: "1.5px solid #bbb", // 枠線を少し太く・濃くしました
+              borderRadius: 8,
+              fontSize: 15, // 少し文字を大きく
+              color: "#111", // ★入力される文字の色をはっきりとした黒にしました
+              backgroundColor: "#fff", // 背景を白く
+              outline: "none",
+              transition: "border-color 0.2s",
+            }}
+            onFocus={(e) => {
+              e.target.style.borderColor = "#2563eb"; // フォーカス時は青く
+              e.target.style.boxShadow = "0 0 0 3px rgba(37, 99, 235, 0.1)"; // フォーカス時の影
+            }}
+            onBlur={(e) => {
+              e.target.style.borderColor = "#bbb";
+              e.target.style.boxShadow = "none";
+            }}
+          />
+        </div>
+
+        <button
+          onClick={handleJoin}
+          disabled={!roomId.trim()}
+          style={{
+            width: "100%",
+            padding: "14px",
+            border: 0,
+            borderRadius: 8,
+            background: roomId.trim() ? "#252525" : "#ccc",
+            color: "#fff",
+            fontSize: 15,
+            fontWeight: 600,
+            cursor: roomId.trim() ? "pointer" : "not-allowed",
+            transition: "background 0.2s",
+          }}
+        >
+          ルームに参加
         </button>
-        <small>取得のみ・編集はまだできません（🌪️アニメーション・タイマー連携中）</small>
-      </header>
-      {state?.error && <p role="alert" style={{ padding: '0 20px', color: '#dc2626' }}>{state.error}</p>}
-      <div style={{ flex: 1, minHeight: 0 }}>
-        {state?.board && (
-          <ReactFlow nodes={nodes} edges={[]} nodesDraggable={false} nodesConnectable={false}
-            deleteKeyCode={null} fitView>
-            <Background gap={16} size={1} />
-            <Controls showInteractive={false} style={{ color: '#171717' }} />
-          </ReactFlow>
-        )}
+
+        <div
+          style={{
+            marginTop: 24,
+            paddingTop: 24,
+            borderTop: "1px solid #eee",
+            fontSize: 12,
+            color: "#666", // 注釈も少し読みやすく濃くしました
+            textAlign: "center",
+          }}
+        >
+          <p style={{ marginBottom: 8 }}>
+            同じルームIDを共有しているユーザーとリアルタイムで共同編集できます
+          </p>
+        </div>
       </div>
-    </main>
+    </div>
   );
 }
