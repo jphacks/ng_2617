@@ -1,5 +1,7 @@
 # 芽生え
 
+開発環境の起動とGemini APIキーの設定は [セットアップ手順](./docs/get_start.md) を参照してください。
+
 [![IMAGE ALT TEXT HERE](https://github.com/user-attachments/assets/2818d23d-36ea-49d7-a028-8ee4256c830c)](https://www.youtube.com/watch?v=piaNsc6ilBI)
 
 ## 製品概要
@@ -49,7 +51,6 @@ https://ya-sheng-e.onrender.com/
 
 - アイデア発想のプロセスに、神経衰弱以外のゲームを追加してバリエーションを持たせたい。
 - 他のアイデア創出法を組み合わせて、より効果的なアイデア創出を促進したい。
-- llmを連携するところまで至らなかったため、そこまでの実装を進めたい。
 - プロダクトの内容と名前、演出について統一感を持たせたい。
 - 単語同士の関連性という観点から、word2vecなどの手法にも挑戦したい。
 - ユーザーに関する情報を保存したり、ほかのユーザーのカーソルを可視化できるようにしたい。
@@ -67,7 +68,7 @@ https://ya-sheng-e.onrender.com/
 
 #### API・データ
 
-- (gemini API)
+- Gemini API（手動・自動で候補語を生成）
 -
 
 #### フレームワーク・ライブラリ・モジュール

@@ -386,7 +386,7 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
         {([['low', '低', '元の単語から遠い'], ['mid', '中', '同じジャンルの関連語'], ['high', '高', '強く関連する単語']] as const).map(([value, label, description]) =>
           <button type="button" className="level-option" key={value} aria-pressed={level === value} disabled={generating} onClick={() => setLevel(value)}><b>{label}</b><small>{description}</small></button>)}
         <button type="button" className="primary generate-button" disabled={!ready || generating} onClick={() => client.execute({ type: 'generation.request', level })}>{generating ? '候補を生成中…' : '単語を生成'}</button>
-        <small className="muted">現在はモックの候補語を使用しています。</small>
+        <small className="muted">ボードのカード本文をGeminiに送信して、最大3つの候補語を生成します。</small>
       </aside>}
       {state.generation.status !== 'idle' && <BoardNotice noticeId={`generation:${state.generation.generationId}:${state.generation.status}`}
         className={`generation-message panel ${state.generation.status}`} role={state.generation.status === 'failed' ? 'alert' : 'status'}>

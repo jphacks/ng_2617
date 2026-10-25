@@ -4,6 +4,7 @@ import type { BoardCommand, BoardEvent, CardChange, ClientIdentity, EditCommand,
 import { canonical, commandFingerprint } from '../domain/board-protocol.ts';
 import { arrowConnectionKey, validBoard, validCard, validCommand, validId } from '../domain/board-validation.ts';
 import { generateWordSuggestions } from './ai-service.ts';
+import { GeminiApiError } from './AIapi.ts';
 import { EDIT_LOCK_TTL_MS, EDIT_REPLY_TIMEOUT_MS, WORD_ADDITION_DELAY_MS, WORD_ADDITION_COUNT, scheduleTimeout, type Schedule } from './edit-lifecycle.ts';
 import { suggestionCards, placeAddedCards } from './word-addition.ts';
 import { onTimerFinished } from './board-timer.ts';
@@ -192,7 +193,8 @@ export function createBoardService(initialBoards: readonly Board[], options: {
       } catch (error) {
         if (!disposed) {
           setGeneration(entry, { status: current() ? 'failed' : 'discarded', generationId, level, source,
-            message: current() ? '候補の生成に失敗しました。もう一度お試しください。' : 'ボードが更新されたため、今回の候補は追加されませんでした。' });
+            message: current() ? (error instanceof GeminiApiError ? error.message : '候補の生成に失敗しました。もう一度お試しください。')
+              : 'ボードが更新されたため、今回の候補は追加されませんでした。' });
           if (options.onGenerationError) options.onGenerationError(error);
           else console.error('Word generation failed:', error);
         }

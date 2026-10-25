@@ -47,7 +47,7 @@
 - `src/server/edit-lifecycle.ts`：期限5分、問い合わせ10秒、自動追加待機30秒、最大3語。
 - `src/server/word-addition.ts`：候補の重複除去と既存カードの右への配置。
 - `src/server/matching-game.ts`：全カードのコピー・シャッフル、入力カード作成、固定枠への補充。期限・接続・競合制御はboard-serviceへ接続。
-- `src/server/ai-service.ts`：関連性を受け取るモック候補生成。外部AI APIは呼ばない。
+- `src/server/ai-service.ts`：手動・自動の共通候補生成。カード本文を制限して `AIapi.ts` のGemini API呼び出しへ渡し、既存語を除く。設定は [get_start.md](./get_start.md) を参照。
 - `src/server/board-timer.ts`：0秒到達時の空の `onTimerFinished` 拡張点。
 - `src/client/board-client.ts`：確定状態・下書き・仮表示・送信状態・再送。
 - `src/client/http-board-transport.ts`：HTTP操作とSSEによる初期取得・更新。
