@@ -1,203 +1,86 @@
-# ボード取得・編集サーバー
+# ボードの取得・編集サーバー
 
-Next.jsのRoute Handlerで、取得と編集のHTTP APIを実装している。
-追加のサーバープロセスやパッケージは不要。
-以下は現在の実装の説明であり、末尾の統合・ライフサイクル計画は未実装である。
+Next.js Route Handlerと単一プロセスのメモリサービスで、操作要求と全端末への通知を実装している。実装の採用値と制約は [implementation.md](./implementation.md) を参照する。
 
-## 起動
+## 起動とAPI
 
-```sh
-npm run dev
-```
+`npm run dev` の後、`http://localhost:3000` からルームへ参加する。`/room/demo` にはサンプルがある。同じルームIDで共同編集する。
 
-画面は `http://localhost:3000` からルームへ入る構成。ボードは `src/components/Board.tsx` が表示する。画面内の編集操作と以下の編集APIの接続は未完了。
-以下のAPIは編集に対応済みで、クライアントの `requestEdit` / `commitEdit` / `cancelEdit` からも呼べる。
+| メソッド・URL | 内容 |
+| --- | --- |
+| GET /api/boards/:boardId | board.snapshot。初回アクセスで空ボードを作成 |
+| GET /api/boards/:boardId/events?userId=...&clientId=... | SSE。購読登録と初期スナップショットを同じ同期処理で実行 |
+| POST /api/boards/:boardId | 下記コマンド。Content-Type: application/json |
 
-## API
+すべてのコマンドはtype、boardId、userId、clientId、requestIdを持つ。URLと本文のboardIdは一致させる。
 
-| メソッド・URL | 要求 | 結果 |
-| --- | --- | --- |
-| `GET /api/boards/:boardId` | 本文なし | `board.snapshot` |
-| `POST /api/boards/:boardId` | `type: "edit.request"` | `edit.granted` と `lockId` |
-| 同上 | `type: "edit.commit"` | `edit.committed` |
-| 同上 | `type: "edit.cancel"` | `edit.cancelled` |
-| 同上 | `type: "edit.check.reply"` | `edit.checked` と `outcome: "saved" / "released"` |
-| `GET /api/boards/:boardId/events?userId=...&clientId=...` | SSE接続 | 初期取得、期限確認、更新通知 |
+| コマンド | 追加属性 |
+| --- | --- |
+| edit.request | cardIds: CardId[] |
+| edit.commit | lockId、changes: `{cardId,patch}[]` |
+| edit.cancel | lockId |
+| edit.check.reply | lockId、checkId、state: editing / committing / cancelling。前二者ではchanges |
+| card.create | card（空本文、編集者なし、BlockCardの関連先・反応も空） |
+| reaction.add / reaction.remove | cardId、reactionId。付与ユーザーは要求のuserIdから決定 |
+| arrow.create | arrow |
+| arrow.delete | arrowId |
+| objects.delete | objectIds: BoardObjectId[] |
+| board.clear / board.restore-sample | なし。対象はサーバーが決定 |
+| timer.start / timer.stop / timer.reset | なし |
+| generation.request | level: low / mid / high |
 
-POSTは `Content-Type: application/json` と、既存の `BoardCommand` 形式で送る。
-URLと本文の `boardId` は一致させる。応答は全体ボード・更新番号・要求ID等を含む。
-GET・POSTともに結果をキャッシュしない。
-現在のGETは、指定ボードが存在しない場合に初期カード付きのボードを作成する。
-
-編集許可の例：
-
-```sh
-curl -X POST http://localhost:3000/api/boards/demo \
-  -H 'Content-Type: application/json' \
-  -d '{"type":"edit.request","boardId":"demo","cardId":"1","userId":"user-1","clientId":"tab-1","requestId":"request-1"}'
-```
-
-確定時は取得した `lockId` と、同じ `userId`・`clientId` を送る。
-`content` は差分ではなく5属性の全体で、`cardId`・`editingUser` は含めない。
+パッチに含められるのはtext・color・font・position・shapeとBlockCardのrelatedIds。ID・種類・編集者・リアクションを混入させた保存は拒否する。保存対象集合は貸し出しと完全一致させる。
 
 ```json
 {
-  "type": "edit.commit",
-  "boardId": "demo",
-  "cardId": "1",
-  "userId": "user-1",
-  "clientId": "tab-1",
-  "requestId": "request-2",
-  "lockId": "編集許可で受け取った値",
-  "content": {
-    "shape": "rectangle",
-    "position": { "x": 250, "y": 150, "z": 0 },
-    "color": "#ffffff",
-    "text": "更新後のカード",
-    "font": "sans-serif"
-  }
+  "type": "edit.request",
+  "boardId": "demo", "userId": "user-1", "clientId": "tab-1", "requestId": "request-1",
+  "cardIds": [{ "type": "card", "uuid": "00000000-0000-4000-8000-000000000001" }]
 }
 ```
 
-取消は `type: "edit.cancel"` とし、確定要求から `content` を除いた形式で送る。
-要求ごとに新しい `requestId` を使う。要求の自動再送・重複成功応答の再現は未実装。
+上のUUIDは形式例。実際の対象IDは取得したボードを参照する。
 
-## 更新関数
+## サービスの構造
 
-`src/server/board-store.ts` が実際のメモリ上のサービスを1つ生成し、次の関数を公開する。
+`src/server/board-store.ts` がHTTP/SSEから共通のサービスを公開し、クライアントへのインポートをserver-onlyで防ぐ。`createBoardService(initialBoards,options)` はテストや内部処理で同じ検証・ハンドラーを利用する入口。
+`executeCommand` が種類を検証して編集・即時操作へ振り分ける。`executeEdit` と編集用公開メソッドも同じ入口を使う。
 
-- `getBoardSnapshot(boardId)`：ボードと更新番号のコピーを取得する。
-- `requestEdit(command)`：カード単位の編集権を取得する。
-- `commitEdit(command)`：編集権を検証し、内容確定とロック解除を行う。
-- `cancelEdit(command)`：内容を保持したままロックを解除する。
-- `replyToEditCheck(command)`：期限確認への返答を検証し、途中保存と延長、または解除を行う。
-- `executeEdit(input, expectedBoardId?)`：未検証の入力を検証して、上記の編集操作へ振り分けるAPI用の入口。
-- `subscribeBoard(identity, receive)`：初期スナップショットと、その後の通知を購読する。戻り値は購読解除関数。
+貸し出し台帳は `lockId → {cardIds,userId,clientId,expiresAt,...}`、カード索引は `objectKey(cardId) → lockId`。全対象を確認して一括取得し、編集者表示、確定、取消、問い合わせ、解除も一括で行う。
+編集権の取得・継続・解除で期限を管理し、実際の変更後に `onBoardUpdated` を一回だけ通す。revision・影響ID一覧・待機設定・配信を操作全体でまとめる。変更なし・拒否・取得では更新しない。本文が変わらなくても、実際のロック取得・解除は更新。
 
-編集関数は `{ status, body }` を返す。実装本体の `src/server/board-service.ts` は
-`createBoardService(initialBoards, options)` で独立した保存領域を作れるため、テストでは実データを使わない。
-クライアントへのインポートを防ぐ `server-only` は、実データを保持する `board-store.ts` に指定している。
+削除対象に自分を含むロックがあれば全体を拒否する。許可時は本体、関連先参照、接続矢印をまとめて除去する。参照元が編集中でも参照除去は実施し、古い下書きの保存時には削除済み参照を除く。
+リアクションと矢印は本文ロックを使わず、編集中も独立に更新できる。本文の確定・途中保存・取消は最新リアクションを保持する。
 
-同一ユーザーの別端末も排他対象とし、ユーザー・端末・ランダムな編集権IDをすべて照合する。
-検証から確定まで同期処理で実行し、カード更新とロック解除の間に別の要求を挟まない。
-更新ごとにボードの `revision` を増やし、確定イベントにはロック解除後のカードを含める。
-保存する入力と返すスナップショットはコピーする。
+## 期限・待機・生成・共有タイマー
 
-## 検証・エラー
+貸し出しから5分で所有端末へedit.checkを送り、10秒無応答なら解除する。編集中で変更があれば途中保存して全対象を継続、変更なしなら解除。確定／取消要求済みの返答は通常の終了処理に合流する。古い問い合わせ・期限コールバックは世代とIDで無効化する。
+
+最後のロック解除・カード系更新から30秒待ち、本文あり・ロック0件・生成中でない・最後の更新が生成以外なら最大3語を生成する。候補を重複除去し、既存カードの右へ配置する。手動は選択した関連性、自動はmidを、同じ関数に渡す。
+生成結果はカード系更新とロックを再確認してから最新Boardへ追加する。共有タイマーだけの更新では破棄しない。生成後も通常の待機を設定するが、最後の更新が生成なので次の満了では停止する。失敗・候補0件で自動再試行しない。
+
+共有タイマーは初期5分停止。開始／停止／リセット／0秒到達だけを同期し、毎秒は配信しない。0秒到達時は残り0で停止し、`board-timer.ts` の空のonTimerFinishedを一度呼ぶ。再開にはリセットが必要。共有タイマー更新では、カード系の最終更新・自動生成待機・進行中の生成の有効性を変えない。
+
+## 通知・再送
+
+全イベントはboard・revision・serverNow・generation・generationSequenceを含む。自分の編集応答はHTTPとSSEの双方から取得できる。他端末にはロックIDを含めずスナップショットを配信する。
+生成開始／失敗／破棄はgeneration.updated、追加確定時はboard.cards-generated。後者はeventId・generationId・generatedCardIdsも含む。生成状態だけの変更ではrevisionを進めない。
+
+要求の結果はボード内のclientId＋requestIdで記録し、同じ内容の再送は結果を再利用する。更新・フック・生成・配信を二重実行しない。同じIDで内容が異なる場合は409を返し、boardId・clientId・requestId・要求種別をエラーログへ記録する。JSONのキー順序には依存しない。
 
 | ステータス | 内容 |
 | --- | --- |
-| 200 | 取得・許可・確定・取消・期限確認への返答に成功 |
-| 400 | JSON、属性の型・サイズ、座標、ボードID等が不正 |
-| 403 | 編集権ID・端末・ユーザーが不一致、または期限切れ |
-| 404 | ボードまたはカードが存在しない |
-| 409 | 既に編集権が取得されている、または問い合わせが終了している |
-| 415 | POSTのContent-Typeがapplication/jsonではない |
+| 200 | 成功・変更なし |
+| 400 | 形式・値・寸法・対象集合等が不正 |
+| 403 | 編集権が不一致・既に終了 |
+| 404 | ボード・カード・矢印の接続先が存在しない |
+| 409 | ロック競合・終了済み問い合わせ・IDの内容不一致・生成開始条件を満たさない |
+| 415 | Content-Typeが不正 |
 
-カードに関する拒否は `edit.rejected` と最新のボードを返す。
-入力不正や存在しないボードは `{ error: string }` を返す。
-文字列IDは空白だけを不可とし128文字まで、本文は100,000文字まで、座標は有限数に制限する。
-contentにIDや編集者を混入させる更新は拒否する。
-
-HTTPアダプターは、編集拒否の403・404・409もイベントとしてクライアント状態管理へ届ける。
-応答の種類・ボードID・端末ID・要求ID・カードIDを照合し、取り違えた応答を適用しない。
-通信には10秒のタイムアウトを設定し、購読解除時は送信を中断する。
-
-## 編集権の有効期限
-
-編集許可から5分で、所有端末へSSEの `edit.check` を送る。カード単位のサーバータイマーのため、GET等のアクセスは不要。
-クライアントは保存済みの5属性と下書きを比較し、以下の形式で既存POSTへ返答する。
-
-```json
-{
-  "type": "edit.check.reply",
-  "boardId": "demo", "cardId": "1", "userId": "user-1", "clientId": "tab-1",
-  "requestId": "reply-1", "lockId": "許可されたロックID", "checkId": "問い合わせのID",
-  "changed": false
-}
-```
-
-変更ありの場合は `changed: true` と確定要求と同じ形式の `content` を送る。
-途中保存はrevisionを進め、編集者とロックIDを保持して5分の期限を再設定する。
-変更なし、または10秒無応答なら解除する。不正な返答は拒否し、応答待ち期限は延長しない。
-問い合わせ中の通常確定・取消も受け付け、先に完了した処理を有効にする。古い問い合わせ・タイマーは状態を戻さない。
-
-## 編集終了後の候補追加
-
-最後のロック解除から30秒待ち、ロック0件・生成中でない・最後の更新が自動生成以外なら候補を生成する。
-最大3枚を既存カードの右に並べ、一括で追加してrevisionを1つ進める。
-自動生成も通常の更新後処理を通り、30秒の待機を再設定する。その満了時には最後の更新が自動生成なので停止する。
-GET、拒否要求、端末の放置では再生成しない。新しい編集を許可すると待機を停止し、生成中の結果も無効にする。
-
-生成には確定済みボードのコピーを渡す。既定の `ai-service.ts` はダミー生成で、
-`createBoardService` の `generateSuggestions` で差し替えられる。
-失敗・候補0件では自動再試行せず、次の実際の更新後に再試行できる。
-時間・枚数の定数は `src/server/edit-lifecycle.ts`、候補の検証と配置は `src/server/word-addition.ts` にある。
-
-## 通知
-
-SSE接続時に最新の `board.snapshot` を送り、以後は更新ごとに通知する。
-所有端末には自分の編集応答を送り、他端末にはロックIDを含まない `board.snapshot` を送る。
-問い合わせは `edit.check`、無応答解除は `edit.released`、候補追加完了は `board.snapshot` で通知する。
-HTTPとSSEで重複した応答は下書きを上書きしない。SSE切断時は編集を終了して再接続を促す。
-クリック・キー入力・ユーザーのアイドル状態は監視しない。`idle.heartbeat` は廃止した。
-
-## 現在の範囲
-
-単一プロセスのメモリにデモボードを保持する。
-再起動・モジュール再読み込みで初期化され、複数プロセス間では共有されない。
-GET時のボード作成はあるが、永続保存、認証、他端末へのリアルタイム配信、画面の編集操作と編集APIの統合は未実装。
-ユーザーID・端末IDは申告値であり、ユーザー認証の代わりにはならない。
-他端末は再取得することで変更を受け取る。編集中の下書きはサーバーへ逐次送らない。
-
-## 統合・ライフサイクルの変更計画（未実装）
-
-共通型・操作仕様は [frontend-merge-plan.md](./frontend-merge-plan.md)、期限・待機の処理は [edit-lifecycle-plan.md](./edit-lifecycle-plan.md) に記載する。現在のAPI・HTTP例が既に新仕様に対応しているという意味ではない。
-
-- **コマンド分割**：空カード追加、カード編集、リアクション、矢印、削除・サンプル復元、共有タイマー、期限確認への返答、手動AI生成を分類し、種類ごとに検証・実行する。現行の除外型による `EditCommand` と、request以外を確定・取消へ流す分岐を見直す。
-- **共通型**：WordCard・BlockCard、UUIDと種別のID、Reaction、Anchorを持つ矢印へ移行する。本文保存・取消・途中保存でもサーバーの最新リアクションを保持する。
-- **削除**：単一・範囲・全消去は対象カードが編集中なら全体を拒否する。対象本体・参照・接続矢印を一括で除去し、参照元が編集中でも削除済み参照を復活させない。
-- **複数移動**：1回の貸し出しに1つのlockIdを発行し、対象cardIds・ユーザー・端末・期限を台帳に持つ。カードID索引で競合を確認し、取得・保存・解除・問い合わせを貸し出し単位で一括処理する。
-- **期限確認**：GET・通常要求からの旧 `expire()` による即解除を置き換える。編集中／確定要求済み／取消要求済みの返答を扱い、通常の確定・取消と同じ終了ハンドラーへ合流する。
-- **共通フック**：貸し出し取得時は `onLockAcquired`、解除時は `onLockReleased` で期限・問い合わせ待ちを管理する。その後 `onBoardUpdated` で全体revisionと配信を1回にまとめる。カード系更新だけが編集の最終更新情報・自動追加待機へ影響し、ロック継続は解除と区別する。
-- **自動追加**：ハートビート判定を廃止し、更新後の待機方式へ移す。満了時に本文あり・最後のカード系更新が自動生成以外・ロック0件・生成中でないことをANDで確認する。isEmptyは空白・改行だけの本文も空と扱い、手動生成にも共用する。
-- **手動追加と配信**：同じ複数語生成・配置関数に関連性を引数で渡す。手動は選択した低・中・高、時限式は中固定。操作要求はHTTP、確定状態と生成ID一覧はSSEで同じボードの全端末へ配信する。
-- **作成・復元**：空カード追加では貸し出しを付与せず、本文編集時に別途許可要求を受ける。サンプル復元はロック0件を確認してカード・矢印を新IDへ一括置換し、Board.timerは保持する。
-- **共有タイマー**：初期5分停止のカウントダウンとして、開始・停止・リセット・0秒到達を同期する。ボードを操作できるユーザーなら操作可能。0秒で停止し、サーバーだけが空のonTimerFinishedを1回呼ぶ。停止・リセットでは呼ばない。編集の待機・生成中の結果を変更しないよう、全体revisionと生成有効性判定の情報を分ける。
-- **Reaction定義**：フロントと同じアプリ共通の固定一覧を使い、一覧にないreactionIdの追加を拒否する。動的定義変更APIは設けない。
-- **Reaction操作**：同じBlockCardではreactionId・userIdの組を1件までとし、取消は自分の付与だけ。明示した追加・取消を処理し、追加済み・取消済みなら変更なし。
-- **矢印**：同じボードのカード間だけを接続し、自己接続・同じ端点と両Anchorの重複を拒否する。異なるAnchor・逆向き・循環は許可。誰でも作成・削除でき、端点編集中も可能。端点変更は削除再作成。同じ矢印ID・同内容の作成と既削除の削除は変更なし、同ID異内容の作成は拒否する。
-- **重複要求**：ボード内のclientId・requestIdで処理中・処理済みの要求を識別し、同内容の再送は二重実行せず前回の受付・結果を返す。AI生成も重複起動しない。
-- **要求IDの内容不一致ログ**：同じ要求IDで内容が異なれば拒否し、サーバーのコンソール等へboardId・clientId・requestId・要求種別を含むエラーログを出す。追加のクライアントエラー送信APIは設けない。
-- **リサイズ**：移動と同じ貸し出しでサイズと必要な位置変更を一括確定する。最小寸法を検証し、本文欄だけの伸縮や実測サイズの変化を無条件に保存しない。
-- **削除経路**：ゴミ箱とDelete／Backspaceからの操作を同じ削除要求として検証する。入力欄の文字削除は削除要求にしない。
-- **生成状態通知**：自動・手動の生成にgenerationIdを発行し、生成中・完了・失敗・競合破棄を全端末へ通知する。開始・失敗・破棄だけではonBoardUpdated・revisionを更新せず、カード追加の確定時に更新する。
-
-共有タイマーは停止中の残り時間・実行中の終了予定時刻を保持し、クライアントには時刻差補正用のサーバー現在時刻も渡す。毎秒配信せず、実際の状態遷移だけを更新とする。
-重複要求の前回結果を返す際は、フック・revision・配信を再実行しない。結果保持の期間・容量・保存先、再起動後の扱い、旧データ移行は別途決める。
-生成状態とgenerationIdは初期取得・再接続でも取得可能にし、カードの確定スナップショット・生成カードID通知とは区別する。開始要求の拒否では新しい生成を開始しない。通知形式と失敗時の自動再試行は未確定。
-
-内容が同じでもロックの取得・解除は更新である。一方、取得・拒否・実際に変更のない即時操作は `onBoardUpdated` を呼ばず、待機を変えない。
-影響IDには削除済みオブジェクトも含める。一括操作の途中でrevisionを増やしたり配信したりせず、対象ロックすべての後始末が済んだ状態で更新を確定する。
-
-### 計画の検証観点
-
-- 通常要求と問い合わせからの確定・取消が競合しても、二重保存・二重解除・古いロックの復活が起きない。
-- 一括操作が全成功または全拒否となり、`onBoardUpdated` が操作全体で1回だけ呼ばれる。
-- 本文に変更がなくても最後のロック解除で待機が始まり、全消去後は空判定で生成しない。
-- 通信タイムアウトをサーバーの失敗と決めつけず、残るロックをライフサイクルで回収できる。
-- 古いタイマー・生成結果・問い合わせ返答を無効化し、SSEの初期取得・配信開始の間で更新を取り逃さない。
-- リアクション・矢印の変更なし操作や要求の再送で待機をリセットせず、同ID異内容では拒否とエラーログが行われる。
-- 共有タイマー終了フックは1実行につき1回だけ呼ばれ、停止・リセット・古い期限コールバックでは呼ばれない。
-- リサイズの位置・サイズが一体で確定し、生成の進行・失敗通知だけでカード更新や自動追加の待機が発生しない。
-
-## 検証
+形式が正しい操作への拒否はcommand.rejectedと最新スナップショットを返す。形式不正や未知ボードでは `{error}` を返す。HTTPアダプターは通信失敗とサーバーの操作拒否を区別する。
 
 ```sh
 npm test
 npx tsc --noEmit --incremental false
 npm run lint
 ```
-
-仮想時計で編集確定・取消・期限確認・途中保存・無応答解除・生成競合・ボード間の分離をテストする。
-SSEの配信・切断、HTTPアダプターの検証、2端末のHTTP＋SSEによる編集から候補追加までの同期もテストする。

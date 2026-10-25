@@ -1,261 +1,281 @@
-import type { Board } from '../domain/board';
-import type {
-  BoardCommand, BoardEvent, CardContent, ClientIdentity,
-} from '../domain/board-protocol';
-import { sameCardContent } from '../domain/board-protocol.ts';
+import type { Board, CardId } from '../domain/board';
+import { getCard, objectKey, sameObjectId } from '../domain/board.ts';
+import type { BoardCommand, BoardEvent, CardChange, CardContent, CardPatch, ClientIdentity, GenerationState, ImmediateOperation } from '../domain/board-protocol';
+import { cardContent, contentPatch } from '../domain/board-protocol.ts';
+import { validPatch } from '../domain/board-validation.ts';
 
-/** 実装側は受信値を検証してから通知する。接続を失ったらonDisconnectを呼ぶ。 */
 export interface BoardTransport {
   send(command: BoardCommand): void | Promise<void>;
-  subscribe(
-    onEvent: (event: BoardEvent) => void,
-    onDisconnect: (reason: string) => void,
-  ): () => void;
+  subscribe(onEvent: (event: BoardEvent) => void, onDisconnect: (reason: string) => void): () => void;
 }
-
-type Editing = Readonly<{
-  phase: 'editing' | 'saving' | 'cancelling';
-  cardId: string;
-  requestId: string;
-  lockId: string;
-  draft: CardContent;
+type Session = Readonly<{
+  phase: 'requesting' | 'editing' | 'saving' | 'cancelling';
+  mode: 'text' | 'transform'; cardIds: readonly CardId[]; requestId: string; acquisitionRequestId: string;
+  lockId?: string; intent: 'editing' | 'committing' | 'cancelling';
+  bases: Readonly<Record<string, CardContent>>; drafts: Readonly<Record<string, CardContent>>;
+  touched: Readonly<Record<string, readonly string[]>>;
+  finalChanges?: readonly CardChange[];
 }>;
-export type EditState =
-  | Readonly<{ phase: 'idle' }>
-  | Readonly<{ phase: 'requesting'; cardId: string; requestId: string }>
-  | Editing;
-
+export type EditState = Readonly<{ phase: 'idle' }> | Session;
 export type BoardClientState = Readonly<{
-  identity: ClientIdentity;
-  status: 'offline' | 'loading' | 'ready';
-  board: Board | null;
-  revision: number;
-  edit: EditState;
-  error: string | null;
+  identity: ClientIdentity; status: 'offline' | 'loading' | 'ready'; board: Board | null; revision: number;
+  edit: EditState; error: string | null; generation: GenerationState; generationSequence: number;
+  generatedCardIds: readonly CardId[]; pendingCommands: readonly BoardCommand[]; serverOffsetMs: number;
 }>;
 
-/** Reactにも通信方式にも依存しない、1端末・1ボードの状態管理。 */
-export function createBoardClient(
-  identity: ClientIdentity,
-  transport: BoardTransport,
-  createRequestId: () => string = () => crypto.randomUUID(),
-) {
+/** 1端末の確定状態・許可待ちの仮表示・許可済み下書きを分離する。 */
+export function createBoardClient(identity: ClientIdentity, transport: BoardTransport, createRequestId = () => crypto.randomUUID()) {
   let state: BoardClientState = {
-    identity: { ...identity }, status: 'offline', board: null,
-    revision: -1, edit: { phase: 'idle' }, error: null,
+    identity: { ...identity }, status: 'offline', board: null, revision: -1, edit: { phase: 'idle' }, error: null,
+    generation: { status: 'idle' }, generationSequence: -1, generatedCardIds: [], pendingCommands: [], serverOffsetMs: 0,
   };
   const listeners = new Set<() => void>();
+  const pending = new Map<string, BoardCommand>();
+  const answeredChecks = new Map<string, BoardCommand>();
+  const seenGenerationEvents = new Set<string>();
   let unsubscribe: (() => void) | undefined;
-  let generation = 0;
+  let connectionGeneration = 0;
   let active = false;
-  const answeredChecks = new Set<string>();
+  let lastServerTime = -Infinity;
+  const buffered: BoardEvent[] = [];
+  const sameIds = (a: readonly CardId[], b: readonly CardId[]) => a.length === b.length && a.every(id => b.some(other => sameObjectId(id, other)));
 
   function publish(update: Partial<BoardClientState>) {
-    state = { ...state, ...update };
-    listeners.forEach((listener) => listener());
+    state = { ...state, ...update, pendingCommands: [...pending.values()].map(command => structuredClone(command)) };
+    listeners.forEach(listener => listener());
   }
-
   function offline(reason: string | null) {
-    active = false;
-    generation += 1;
-    unsubscribe?.();
-    unsubscribe = undefined;
-    answeredChecks.clear();
-    // 結果不明の送信を再試行しない。再接続時に確定状態を取得する。
-    publish({ status: 'offline', edit: { phase: 'idle' }, error: reason });
+    active = false; connectionGeneration++;
+    unsubscribe?.(); unsubscribe = undefined;
+    pending.clear(); answeredChecks.clear(); buffered.length = 0;
+    publish({ status: 'offline', edit: { phase: 'idle' }, error: reason, generatedCardIds: [] });
   }
-
   function send(command: BoardCommand) {
-    const sentGeneration = generation;
-    const failed = () => {
-      if (active && generation === sentGeneration) {
-        offline('通信に失敗しました。再接続して最新のボードを取得してください。');
-      }
+    const generation = connectionGeneration;
+    if (command.type !== 'board.get') pending.set(command.requestId, structuredClone(command));
+    const failed = (error: unknown) => {
+      if (!active || connectionGeneration !== generation || (command.type !== 'board.get' && !pending.has(command.requestId))) return;
+      // HTTP失敗は拒否・切断ではない。SSEと確定/取消の最終内容を残す。
+      publish({ error: error instanceof Error ? error.message : '応答を確認できません。元の要求を再送できます。' });
     };
-    try {
-      Promise.resolve(transport.send(structuredClone(command))).catch(failed);
-    } catch {
-      failed();
+    try { Promise.resolve(transport.send(structuredClone(command))).catch(failed); } catch (error) { failed(error); }
+  }
+  function changes(edit: Session): CardChange[] {
+    return edit.cardIds.map(cardId => ({ cardId, patch: contentPatch(edit.bases[objectKey(cardId)], edit.drafts[objectKey(cardId)]) }));
+  }
+  function complete() {
+    const edit = state.edit;
+    if (edit.phase === 'idle' || !edit.lockId) return;
+    const requestId = createRequestId();
+    if (edit.intent === 'cancelling') {
+      publish({ edit: { ...edit, phase: 'cancelling', requestId }, error: null });
+      send({ ...identity, type: 'edit.cancel', requestId, lockId: edit.lockId });
+    } else {
+      const finalChanges = changes(edit);
+      publish({ edit: { ...edit, phase: 'saving', requestId, intent: 'committing', finalChanges }, error: null });
+      send({ ...identity, type: 'edit.commit', requestId, lockId: edit.lockId, changes: finalChanges });
     }
   }
-
-  function receive(event: BoardEvent) {
-    if (event.board.boardId !== state.identity.boardId ||
-        !Number.isSafeInteger(event.revision) || event.revision < 0) return;
-
-    if (state.status !== 'loading' && event.revision < state.revision) {
-      // 古い許可を採用しない一方、自分の応答を捨てて待ち続けることも避ける。
-      if ('requestId' in event && state.edit.phase !== 'idle' && state.edit.phase !== 'editing' &&
-          event.clientId === state.identity.clientId &&
-          event.requestId === state.edit.requestId && event.cardId === state.edit.cardId) {
-        offline('編集応答の順序が前後しました。再接続して最新の状態を確認してください。');
-      }
-      // 別カードの新しい通知が先着していても、有効なロックの期限確認には返答する。
-      if (event.type === 'edit.check') answerCheck(event);
-      return;
+  function grant(edit: Session, lockId: string, board: Board): Session | undefined {
+    const bases: Record<string, CardContent> = {};
+    const drafts: Record<string, CardContent> = {};
+    for (const id of edit.cardIds) {
+      const card = getCard(board, id);
+      if (!card || card.editingUser?.userId !== identity.userId) return undefined;
+      const key = objectKey(id);
+      const base = cardContent(card);
+      bases[key] = base;
+      const proposed = edit.drafts[key];
+      const before = edit.bases[key];
+      // 仮移動量を許可時の最新の位置・サイズへ合成する。
+      drafts[key] = edit.mode === 'transform' ? { ...base,
+        position: { x: base.position.x + proposed.position.x - before.position.x,
+          y: base.position.y + proposed.position.y - before.position.y, z: proposed.position.z },
+        shape: { width: base.shape.width + proposed.shape.width - before.shape.width,
+          height: base.shape.height + proposed.shape.height - before.shape.height },
+      } : base;
     }
-
-    // 接続直後は全体取得の応答を待ち、以前の編集応答から再開しない。
-    if (state.status === 'loading' && event.type !== 'board.snapshot') return;
-
-    const board = structuredClone(event.board);
+    return { ...edit, phase: 'editing', lockId, bases, drafts };
+  }
+  function answerCheck(check: Extract<BoardEvent, { type: 'edit.check' }>) {
+    let edit = state.edit;
+    if (state.status !== 'ready' || edit.phase === 'idle' || check.clientId !== identity.clientId ||
+        check.userId !== identity.userId || !sameIds(edit.cardIds, check.cardIds)) return;
+    // 許可応答だけが失われた場合も所有端末への問い合わせから回収できる。
+    if (edit.phase === 'requesting' && state.board) {
+      const granted = grant(edit, check.lockId, state.board);
+      if (!granted) return;
+      pending.delete(edit.acquisitionRequestId);
+      edit = granted; publish({ edit });
+    }
+    if (edit.lockId !== check.lockId) return;
+    const key = JSON.stringify([check.lockId, check.checkId]);
+    if (answeredChecks.has(key)) return;
+    const common = { ...identity, type: 'edit.check.reply' as const, requestId: createRequestId(), lockId: check.lockId, checkId: check.checkId };
+    const command: BoardCommand = edit.intent === 'cancelling' ? { ...common, state: 'cancelling' }
+      : { ...common, state: edit.intent === 'committing' ? 'committing' : 'editing', changes: edit.finalChanges ?? changes(edit) };
+    answeredChecks.set(key, command); send(command); publish({});
+  }
+  function receive(input: BoardEvent) {
+    if (input.board.boardId !== identity.boardId || !Number.isSafeInteger(input.revision) || input.revision < 0) return;
+    const value = structuredClone(input);
+    const initializing = state.status === 'loading';
+    if (initializing && value.type !== 'board.snapshot') { buffered.push(value); return; }
+    let board = state.board;
+    let revision = state.revision;
+    if (initializing || value.revision >= revision) { board = value.board; revision = value.revision; }
+    if (!board) return;
+    let generation = state.generation;
+    let generationSequence = state.generationSequence;
+    if (initializing || value.generationSequence >= generationSequence) {
+      generation = value.generation; generationSequence = value.generationSequence;
+    }
+    let serverOffsetMs = state.serverOffsetMs;
+    if (initializing || value.serverNow > lastServerTime) { lastServerTime = value.serverNow; serverOffsetMs = value.serverNow - Date.now(); }
     let edit = state.edit;
     let error = state.error;
-    const matches = 'requestId' in event &&
-      event.clientId === state.identity.clientId && edit.phase !== 'idle' &&
-      event.requestId === edit.requestId && event.cardId === edit.cardId;
+    const ownReply = 'requestId' in value && value.clientId === identity.clientId;
+    const pendingCommand = ownReply ? pending.get(value.requestId) : undefined;
+    if (ownReply) pending.delete(value.requestId);
+    const matches = ownReply && edit.phase !== 'idle' && (value.requestId === edit.requestId || value.requestId === edit.acquisitionRequestId);
+    let finishAfterGrant = false;
+    if (value.type === 'edit.granted' && matches && edit.phase === 'requesting' && sameIds(value.cardIds, edit.cardIds)) {
+      const granted = grant(edit, value.lockId, board);
+      if (granted) { edit = granted; finishAfterGrant = edit.intent !== 'editing'; error = null; }
+      else { edit = { phase: 'idle' }; error = 'この編集権は終了しています。最新のカードから編集を開始してください。'; }
+    } else if (value.type === 'command.rejected' && ownReply && pendingCommand) {
+      error = value.reason;
+      if (matches && edit.phase !== 'idle') {
+        edit = edit.lockId && edit.cardIds.every(id => getCard(board!, id)?.editingUser?.userId === identity.userId)
+          ? { ...edit, phase: 'editing', intent: 'editing', finalChanges: undefined } : { phase: 'idle' };
+      }
+    } else if ((value.type === 'edit.committed' || value.type === 'edit.cancelled') && ownReply && edit.phase !== 'idle' &&
+        value.lockId === edit.lockId && sameIds(value.cardIds, edit.cardIds)) {
+      edit = { phase: 'idle' }; error = null;
+    } else if (value.type === 'edit.checked' && ownReply && edit.phase !== 'idle' && value.lockId === edit.lockId && sameIds(value.cardIds, edit.cardIds)) {
+      if (value.outcome !== 'saved') { edit = { phase: 'idle' }; error = null; }
+    } else if (value.type === 'edit.released' && value.clientId === identity.clientId && value.userId === identity.userId &&
+        edit.phase !== 'idle' && value.lockId === edit.lockId && sameIds(value.cardIds, edit.cardIds)) {
+      edit = { phase: 'idle' }; error = '期限確認への応答が届かなかったため、編集権が解除されました。';
+    } else if (value.type === 'command.accepted' && pendingCommand) error = null;
 
-    if (matches) {
-      if (event.type === 'edit.granted' && edit.phase === 'requesting') {
-        const card = board.cards.find((item) => item.cardId === event.cardId);
-        if (!card || card.editingUser?.userId !== state.identity.userId) {
-          offline('編集許可の内容が一致しません。再接続してください。');
-          return;
+    // 最新の確定属性へ下書きを重ねる。サーバーで除去された関連先は復活させない。
+    if (edit.phase === 'editing' && !finishAfterGrant) {
+      const currentEdit = edit;
+      const bases = { ...edit.bases }; const drafts = { ...edit.drafts };
+      if (!edit.cardIds.every(id => getCard(board!, id)?.editingUser?.userId === identity.userId)) {
+        edit = { phase: 'idle' }; error = '編集権が終了しました。最新の内容を確認してください。';
+      } else {
+        for (const id of currentEdit.cardIds) {
+          const key = objectKey(id); const base = cardContent(getCard(board, id)!);
+          // 途中保存の送信後に元の値へ戻した入力も保持する。
+          const patch = Object.fromEntries((currentEdit.touched[key] ?? []).map(field => [field,
+            (currentEdit.drafts[key] as unknown as Record<string, unknown>)[field]]));
+          const draft = { ...base, ...patch } as CardContent;
+          if (draft.cardKind === 'block') drafts[key] = { ...draft, relatedIds: draft.relatedIds.filter(id => getCard(board!, id)) };
+          else drafts[key] = draft;
+          bases[key] = base;
         }
-        edit = {
-          phase: 'editing', cardId: card.cardId, requestId: event.requestId,
-          lockId: event.lockId,
-          draft: {
-            shape: card.shape, position: { ...card.position }, color: card.color,
-            text: card.text, font: card.font,
-          },
-        };
-        error = null;
-      } else if (event.type === 'edit.rejected') {
-        edit = { phase: 'idle' };
-        error = event.reason;
-      } else if ((event.type === 'edit.committed' && edit.phase === 'saving') ||
-                 (event.type === 'edit.cancelled' && edit.phase === 'cancelling')) {
-        edit = { phase: 'idle' };
-        error = null;
+        edit = { ...currentEdit, bases, drafts };
       }
     }
-
-    if (event.type === 'edit.checked' && event.clientId === state.identity.clientId &&
-        edit.phase !== 'idle' && edit.phase !== 'requesting' && event.lockId === edit.lockId &&
-        event.cardId === edit.cardId && event.outcome === 'released') {
-      edit = { phase: 'idle' };
-      error = null;
+    let generatedCardIds = state.generatedCardIds.filter(id => getCard(board!, id));
+    if (initializing) { seenGenerationEvents.clear(); generatedCardIds = []; }
+    if (value.type === 'board.cards-generated' && !seenGenerationEvents.has(value.eventId)) {
+      seenGenerationEvents.add(value.eventId);
+      generatedCardIds = [...new Map([...generatedCardIds, ...value.generatedCardIds.filter(id => getCard(board!, id))].map(id => [objectKey(id), id])).values()];
     }
-    if (event.type === 'edit.released' && event.clientId === state.identity.clientId &&
-        event.userId === state.identity.userId && edit.phase !== 'idle' && edit.phase !== 'requesting' &&
-        event.lockId === edit.lockId && event.cardId === edit.cardId) {
-      edit = { phase: 'idle' };
-      error = '期限確認への応答が届かなかったため、編集権が解除されました。';
-    }
-    // 通常確定・取消の応答より先に解除後のスナップショットが届く場合がある。
-    // 送信中は自分の操作結果か通信タイムアウトを待ち、成功を権限消失と誤認しない。
-    if (edit.phase === 'editing') {
-      const editingCardId = edit.cardId;
-      const card = board.cards.find((item) => item.cardId === editingCardId);
-      if (!card || card.editingUser?.userId !== state.identity.userId) {
-        edit = { phase: 'idle' };
-        error = '編集権が失われました。最新の内容から編集を開始してください。';
+    if (edit.phase === 'idle') {
+      answeredChecks.clear();
+      if (state.edit.phase !== 'idle') {
+        const ended = state.edit;
+        for (const [requestId, command] of pending) {
+          if (requestId === ended.acquisitionRequestId || ('lockId' in command && command.lockId === ended.lockId)) pending.delete(requestId);
+        }
       }
     }
-    if (edit.phase === 'idle') answeredChecks.clear();
-    publish({ board, revision: event.revision, status: 'ready', edit, error });
-    if (event.type === 'edit.check') answerCheck(event);
+    publish({ status: 'ready', board, revision, edit, error, generation, generationSequence, generatedCardIds, serverOffsetMs });
+    if (finishAfterGrant) complete();
+    if (value.type === 'edit.check') answerCheck(value);
+    if (initializing) {
+      const initialRevision = value.revision;
+      const queued = buffered.splice(0);
+      for (const queuedEvent of queued) {
+        // 初期スナップショットに含まれる過去の生成は案内しない。
+        if (queuedEvent.type === 'board.cards-generated' && queuedEvent.revision <= initialRevision) seenGenerationEvents.add(queuedEvent.eventId);
+        receive(queuedEvent);
+      }
+    }
   }
-
-  function answerCheck(event: Extract<BoardEvent, { type: 'edit.check' }>) {
-    const edit = state.edit;
-    if (state.status !== 'ready' || edit.phase !== 'editing' ||
-        event.clientId !== state.identity.clientId || event.userId !== state.identity.userId ||
-        event.cardId !== edit.cardId || event.lockId !== edit.lockId || answeredChecks.has(event.checkId)) return;
-    const saved = state.board?.cards.find(card => card.cardId === edit.cardId);
-    if (!saved) return;
-    answeredChecks.add(event.checkId);
-    const command = {
-      ...state.identity, type: 'edit.check.reply' as const, requestId: createRequestId(),
-      cardId: edit.cardId, lockId: edit.lockId, checkId: event.checkId,
-    };
-    // 途中保存中も編集・確定・取消を許す。返答の受信では下書きを上書きしない。
-    send(sameCardContent(edit.draft, saved)
-      ? { ...command, changed: false }
-      : { ...command, changed: true, content: edit.draft });
-  }
-
   function connect() {
     if (active) return;
-    active = true;
-    const currentGeneration = ++generation;
-    publish({ status: 'loading', edit: { phase: 'idle' }, error: null });
+    active = true; const generation = ++connectionGeneration;
+    pending.clear(); answeredChecks.clear(); seenGenerationEvents.clear(); buffered.length = 0;
+    publish({ status: 'loading', edit: { phase: 'idle' }, error: null, generatedCardIds: [] });
     try {
-      const stop = transport.subscribe(
-        (event) => {
-          if (active && generation === currentGeneration) receive(event);
-        },
-        (reason) => {
-          if (active && generation === currentGeneration) offline(reason);
-        },
-      );
-      if (!active || generation !== currentGeneration) { stop(); return; }
+      const stop = transport.subscribe(value => { if (active && generation === connectionGeneration) receive(value); },
+        reason => { if (active && generation === connectionGeneration) offline(reason); });
+      if (!active || generation !== connectionGeneration) { stop(); return; }
       unsubscribe = stop;
-      send({ ...state.identity, type: 'board.get', requestId: createRequestId() });
-    } catch {
-      offline('接続できませんでした。再接続してください。');
-    }
+      send({ ...identity, type: 'board.get', requestId: createRequestId() });
+    } catch { offline('接続できませんでした。再接続してください。'); }
   }
-
   return {
     getSnapshot: () => state,
-    subscribe(listener: () => void) {
-      listeners.add(listener);
-      return () => { listeners.delete(listener); };
-    },
-    connect,
-    disconnect: () => offline(null),
-    requestEdit(cardId: string): boolean {
-      if (state.status !== 'ready' || state.edit.phase !== 'idle') return false;
-      const card = state.board?.cards.find((item) => item.cardId === cardId);
-      // 同じユーザーの別端末が編集中の場合も、ここでは取得しない。
-      if (!card || card.editingUser) return false;
+    subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    connect, disconnect: () => offline(null),
+    requestEdit(ids: CardId | readonly CardId[], mode: 'text' | 'transform' = 'text'): boolean {
+      if (state.status !== 'ready' || state.edit.phase !== 'idle' || !state.board) return false;
+      const cardIds = Array.isArray(ids) ? ids : [ids as CardId];
+      if (!cardIds.length || new Set(cardIds.map(objectKey)).size !== cardIds.length) return false;
+      const bases: Record<string, CardContent> = {};
+      for (const id of cardIds) {
+        const card = getCard(state.board, id);
+        if (!card || card.editingUser) return false;
+        bases[objectKey(id)] = cardContent(card);
+      }
       const requestId = createRequestId();
-      publish({ edit: { phase: 'requesting', cardId, requestId }, error: null });
-      send({ ...state.identity, type: 'edit.request', cardId, requestId });
+      publish({ edit: { phase: 'requesting', mode, cardIds: structuredClone(cardIds), requestId, acquisitionRequestId: requestId,
+        intent: 'editing', bases, drafts: structuredClone(bases), touched: {} }, error: null });
+      send({ ...identity, type: 'edit.request', requestId, cardIds }); publish({});
       return true;
     },
-    updateDraft(patch: Partial<CardContent>): boolean {
-      if (state.status !== 'ready' || state.edit.phase !== 'editing') return false;
-      // 許可した属性だけを取り込む。IDやeditingUserの変更を混入させない。
-      const previous = state.edit.draft;
-      const draft: CardContent = {
-        shape: patch.shape ?? previous.shape,
-        position: { ...(patch.position ?? previous.position) },
-        color: patch.color ?? previous.color,
-        text: patch.text ?? previous.text,
-        font: patch.font ?? previous.font,
-      };
-      if (![draft.position.x, draft.position.y, draft.position.z].every(Number.isFinite)) {
-        return false;
-      }
-      publish({ edit: { ...state.edit, draft } });
+    updateDraft(patch: CardPatch, cardId?: CardId): boolean {
+      const edit = state.edit;
+      if (state.status !== 'ready' || edit.phase === 'idle' || edit.intent !== 'editing' ||
+          (edit.phase !== 'editing' && !(edit.phase === 'requesting' && edit.mode === 'transform'))) return false;
+      const id = cardId ?? edit.cardIds[0]; const key = objectKey(id); const previous = edit.drafts[key];
+      if (!previous || !validPatch(patch) || (previous.cardKind === 'word' && patch.relatedIds !== undefined)) return false;
+      if (edit.phase === 'requesting' && Object.keys(patch).some(key => key !== 'position' && key !== 'shape')) return false;
+      publish({ edit: { ...edit, drafts: { ...edit.drafts, [key]: { ...previous, ...structuredClone(patch) } as CardContent },
+        touched: { ...edit.touched, [key]: [...new Set([...(edit.touched[key] ?? []), ...Object.keys(patch)])] } } });
       return true;
     },
     commitEdit(): boolean {
-      if (state.status !== 'ready' || state.edit.phase !== 'editing') return false;
       const edit = state.edit;
-      const requestId = createRequestId();
-      publish({ edit: { ...edit, phase: 'saving', requestId }, error: null });
-      send({
-        ...state.identity, type: 'edit.commit', requestId,
-        cardId: edit.cardId, lockId: edit.lockId, content: edit.draft,
-      });
+      if (state.status !== 'ready' || edit.phase === 'idle' || edit.intent !== 'editing' ||
+          (edit.phase !== 'editing' && edit.phase !== 'requesting')) return false;
+      publish({ edit: { ...edit, intent: 'committing' } });
+      if (edit.phase === 'editing') complete();
       return true;
     },
     cancelEdit(): boolean {
-      if (state.status !== 'ready' || state.edit.phase !== 'editing') return false;
       const edit = state.edit;
-      const requestId = createRequestId();
-      publish({ edit: { ...edit, phase: 'cancelling', requestId }, error: null });
-      send({
-        ...state.identity, type: 'edit.cancel', requestId,
-        cardId: edit.cardId, lockId: edit.lockId,
-      });
+      if (state.status !== 'ready' || edit.phase === 'idle' || edit.phase === 'saving' || edit.phase === 'cancelling') return false;
+      publish({ edit: { ...edit, intent: 'cancelling' } });
+      if (edit.lockId) complete();
       return true;
+    },
+    execute(operation: ImmediateOperation): boolean {
+      if (state.status !== 'ready') return false;
+      send({ ...structuredClone(operation), ...identity, requestId: createRequestId() } as BoardCommand); publish({});
+      return true;
+    },
+    retryPending() { for (const command of [...pending.values()]) send(command); },
+    dismissGuidance(cardIds: readonly CardId[]) {
+      const dismissed = new Set(cardIds.map(objectKey));
+      publish({ generatedCardIds: state.generatedCardIds.filter(id => !dismissed.has(objectKey(id))) });
     },
   };
 }
-
 export type BoardClient = ReturnType<typeof createBoardClient>;

@@ -1,181 +1,71 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createHttpBoardTransport as httpTransport } from './http-board-transport.ts';
-import { createBoardClient } from './board-client.ts';
+import { createHttpBoardTransport } from './http-board-transport.ts';
+import { board, cid, commands, identity, snapshot } from '../test/board-fixtures.mjs';
 import { createBoardService } from '../server/board-service.ts';
+import { connectedClient, until } from '../test/transport-harness.mjs';
 
-function createHttpBoardTransport(fetcher, factory = () => ({ close() {} })) {
-  return httpTransport(fetcher, factory);
+function setup(t, fetcher = async () => Response.json(snapshot())) {
+  const streams = []; const events = []; const errors = [];
+  const transport = createHttpBoardTransport(fetcher, url => {
+    assert.equal(url, '/api/boards/board/events?userId=user&clientId=client');
+    const stream = { closed: false, close() { this.closed = true; } }; streams.push(stream); return stream;
+  });
+  const stop = transport.subscribe(event => events.push(event), error => errors.push(error)); t.after(stop);
+  const command = commands(); const start = () => transport.send(command('board.get'));
+  const emit = value => streams.at(-1).onmessage({ data: typeof value === 'string' ? value : JSON.stringify(value) });
+  return { streams, events, errors, transport, stop, command, start, emit };
 }
-
-const snapshot = {
-  type: 'board.snapshot', revision: 0,
-  board: { boardId: 'demo', cards: [{
-    cardId: '1', shape: 'rectangle', position: { x: 0, y: 0, z: 0 },
-    text: 'サーバーのカード', color: '#fff', font: 'sans-serif',
-  }] },
-};
-const command = {
-  type: 'board.get', boardId: 'demo', userId: 'user', clientId: 'client', requestId: 'request',
-};
-
-test('HTTP応答を既存クライアントの状態に反映する', async () => {
-  const transport = createHttpBoardTransport(async (url, options) => {
-    assert.equal(url, '/api/boards/demo');
-    assert.equal(options.cache, 'no-store');
-    return Response.json(snapshot);
-  });
-  const client = createBoardClient(command, transport, () => 'request');
-  const ready = new Promise((resolve) => {
-    client.subscribe(() => { if (client.getSnapshot().status === 'ready') resolve(); });
-  });
-  client.connect();
-  await ready;
-  assert.deepEqual(client.getSnapshot().board, snapshot.board);
-  client.disconnect();
+test('初期取得はSSEの最初のスナップショットを使い、独立したGETとの隙間を作らない', async t => {
+  const s = setup(t, () => assert.fail('GETで初期化しない')); await s.start();
+  assert.equal(s.events.length, 0); s.streams[0].onopen(); s.emit(snapshot()); assert.equal(s.events.length, 1);
+  s.emit(snapshot(board(), 1)); assert.equal(s.events.length, 2);
 });
-
-test('404・不正なJSON・別ボード・重複カードを状態管理に渡さない', async () => {
-  for (const response of [
-    new Response('', { status: 404 }),
-    new Response('invalid json'),
-    Response.json({ ...snapshot, board: { ...snapshot.board, boardId: 'other' } }),
-    Response.json({ ...snapshot, board: { ...snapshot.board, cards: [snapshot.board.cards[0], snapshot.board.cards[0]] } }),
-    Response.json({ ...snapshot, revision: -1 }),
-  ]) {
-    const errors = [];
-    const transport = createHttpBoardTransport(async () => response);
-    const stop = transport.subscribe(() => assert.fail('不正な応答を受信した'), reason => errors.push(reason));
-    await transport.send(command);
-    assert.equal(errors.length, 1);
-    stop();
-  }
-});
-
-test('購読解除で送信を中断し、古い応答を次の購読者へ渡さない', async () => {
-  let finish;
-  let signal;
-  const transport = createHttpBoardTransport((_url, options) => {
-    signal = options.signal;
-    return new Promise(resolve => { finish = resolve; });
-  });
-  const stop = transport.subscribe(() => assert.fail('古い受信'), () => assert.fail('古いエラー'));
-  const sending = transport.send(command);
-  stop();
-  assert.equal(signal.aborted, true);
-  const stopNew = transport.subscribe(() => assert.fail('新しい購読への混入'), () => assert.fail('エラー'));
-  finish(Response.json(snapshot));
-  await sending;
-  stopNew();
-});
-
-test('POSTで編集許可・競合拒否・確定・取消を既存クライアントへ届ける', async () => {
-  const service = createBoardService([snapshot.board]);
-  const transport = createHttpBoardTransport(async (_url, options) => {
-    if (options.method === 'GET') return Response.json(service.getBoardSnapshot('demo'));
-    assert.equal(options.method, 'POST');
-    assert.equal(options.headers['Content-Type'], 'application/json');
-    const result = service.executeEdit(JSON.parse(options.body), 'demo');
-    return Response.json(result.body, { status: result.status });
-  });
-  const client = createBoardClient(command, transport);
-  const until = predicate => new Promise(resolve => {
-    const stop = client.subscribe(() => {
-      if (predicate(client.getSnapshot())) { stop(); resolve(); }
-    });
-  });
-  let changed = until(state => state.status === 'ready');
-  client.connect();
-  await changed;
-  // 読み込み後に別端末がロックを取る競合を再現する。
-  const other = service.requestEdit({ ...command, type: 'edit.request', clientId: 'other', cardId: '1' });
-  changed = until(state => state.error !== null);
-  client.requestEdit('1');
-  await changed;
-  assert.equal(client.getSnapshot().status, 'ready');
-  assert.equal(client.getSnapshot().edit.phase, 'idle');
-  service.cancelEdit({ ...command, type: 'edit.cancel', clientId: 'other', cardId: '1', lockId: other.body.lockId });
-  client.disconnect();
-  changed = until(state => state.status === 'ready');
-  client.connect();
-  await changed;
-  changed = until(state => state.edit.phase === 'editing');
-  client.requestEdit('1');
-  await changed;
-  client.updateDraft({ text: 'HTTPで更新' });
-  changed = until(state => state.edit.phase === 'idle');
-  client.commitEdit();
-  await changed;
-  assert.equal(service.getBoardSnapshot('demo').board.cards[0].text, 'HTTPで更新');
-  assert.equal(client.getSnapshot().board.cards[0].text, 'HTTPで更新');
-  changed = until(state => state.edit.phase === 'editing');
-  client.requestEdit('1');
-  await changed;
-  client.updateDraft({ text: '破棄する変更' });
-  changed = until(state => state.edit.phase === 'idle');
-  client.cancelEdit();
-  await changed;
-  assert.equal(client.getSnapshot().board.cards[0].text, 'HTTPで更新');
-  client.disconnect();
-});
-
-test('SSEの識別情報・形式を検証し、購読解除後のイベントを無視する', async () => {
+test('SSEで不正JSON・別ボード・重複ID・旧ID・不正Reaction・矢印・端末の取り違えを拒否する', async t => {
   for (const invalid of [
-    'not json',
-    JSON.stringify({ ...snapshot, board: { ...snapshot.board, boardId: 'other' } }),
-    JSON.stringify({ ...snapshot, type: 'edit.check', clientId: 'other', userId: 'user', cardId: '1', lockId: 'lock', checkId: 'check' }),
-    JSON.stringify({ ...snapshot, type: 'edit.check', clientId: 'client', userId: 'other', cardId: '1', lockId: 'lock', checkId: 'check' }),
-    JSON.stringify({ ...snapshot, type: 'edit.check', clientId: 'client', userId: 'user', cardId: '1', lockId: 'lock' }),
+    'bad json', snapshot({ ...board(), boardId: 'other' }), snapshot(board([board().cards[0], board().cards[0]])),
+    snapshot(board([{ ...board().cards[0], cardId: 'old' }])), snapshot(board(), -1),
+    snapshot(board(), 0, { type: 'edit.check', userId: 'other', clientId: 'client', cardIds: [cid(1)], lockId: 'lock', checkId: 'check' }),
+    snapshot(board(), 0, { type: 'edit.check', userId: 'user', clientId: 'other', cardIds: [cid(1)], lockId: 'lock', checkId: 'check' }),
+    snapshot(board(), 0, { type: 'board.cards-generated', eventId: 'event', generationId: 'g', generatedCardIds: [cid(99)] }),
   ]) {
-    const events = [];
-    const errors = [];
-    let stream;
-    const transport = createHttpBoardTransport(async () => Response.json(snapshot), url => {
-      assert.equal(url, '/api/boards/demo/events?userId=user&clientId=client');
-      stream = { closed: false, close() { this.closed = true; } };
-      return stream;
-    });
-    const stop = transport.subscribe(event => events.push(event), error => errors.push(error));
-    await transport.send(command);
-    stream.onopen();
-    stream.onmessage({ data: JSON.stringify({ ...snapshot, revision: 1 }) });
-    assert.equal(events.length, 2);
-    stream.onmessage({ data: invalid });
-    assert.equal(errors.length, 1);
-    assert.equal(stream.closed, true);
-    stop();
-    stream.onmessage({ data: JSON.stringify(snapshot) });
-    assert.equal(events.length, 2);
+    const s = setup(t); await s.start(); s.emit(invalid);
+    assert.equal(s.errors.length, 1); assert.equal(s.events.length, 0); assert.equal(s.streams[0].closed, true);
+    s.stop(); s.emit(snapshot()); assert.equal(s.events.length, 0);
   }
 });
-
-test('SSEの切断は既存クライアントをオフラインにし、接続を閉じる', async () => {
-  let stream;
-  const transport = createHttpBoardTransport(async () => Response.json(snapshot), () => {
-    stream = { closed: false, close() { this.closed = true; } };
-    return stream;
+test('POSTの拒否も正常な応答として受信し、HTTP失敗はSSEを切断せず呼出元へ返す', async t => {
+  const command = commands()('generation.request', { level: 'mid' });
+  const rejected = snapshot(board(), 0, { type: 'command.rejected', clientId: 'client', requestId: command.requestId, commandType: command.type, reason: 'locked' });
+  const s = setup(t, async (_url, options) => {
+    assert.equal(options.method, 'POST'); assert.equal(options.cache, 'no-store'); assert.equal(options.headers['Content-Type'], 'application/json');
+    return Response.json(rejected, { status: 409 });
   });
-  const client = createBoardClient(command, transport);
-  client.connect();
-  for (let i = 0; i < 20 && !stream; i++) await Promise.resolve();
-  assert.ok(stream);
-  stream.onopen();
-  stream.onerror();
-  assert.equal(client.getSnapshot().status, 'offline');
-  assert.equal(stream.closed, true);
+  await s.start(); s.emit(snapshot()); await s.transport.send(command);
+  assert.equal(s.events.at(-1).type, 'command.rejected'); assert.equal(s.errors.length, 0);
+  const failed = setup(t, async () => { throw new Error('network'); }); await failed.start(); failed.emit(snapshot());
+  await assert.rejects(failed.transport.send(command), /network/);
+  assert.equal(failed.errors.length, 0); assert.equal(failed.streams[0].closed, false);
 });
-
-test('期限確認のHTTP応答で問い合わせID・ロックIDの取り違えを拒否する', async () => {
-  const request = { ...command, type: 'edit.check.reply', cardId: '1', lockId: 'lock', checkId: 'check', changed: false };
-  for (const mismatch of [{ lockId: 'other' }, { checkId: 'other' }]) {
-    const errors = [];
-    const transport = createHttpBoardTransport(async () => Response.json({
-      ...snapshot, type: 'edit.checked', clientId: 'client', requestId: 'request', cardId: '1',
-      lockId: 'lock', checkId: 'check', outcome: 'released', ...mismatch,
-    }));
-    const stop = transport.subscribe(() => assert.fail('mismatched check reply'), error => errors.push(error));
-    await transport.send(request);
-    assert.equal(errors.length, 1);
-    stop();
+test('HTTPで要求・端末・問い合わせ・ロックが一致しない応答を拒否する', async t => {
+  const request = commands()('edit.check.reply', { lockId: 'lock', checkId: 'check', state: 'cancelling' });
+  const reply = snapshot(board(), 0, { type: 'edit.checked', clientId: 'client', requestId: request.requestId,
+    cardIds: [cid(1)], lockId: 'lock', checkId: 'check', outcome: 'cancelled' });
+  for (const extra of [{ clientId: 'other' }, { requestId: 'other' }, { lockId: 'other' }, { checkId: 'other' }, { board: { ...board(), boardId: 'other' } }]) {
+    const s = setup(t, async () => Response.json({ ...reply, ...extra }));
+    await assert.rejects(s.transport.send(request), /一致/); assert.equal(s.events.length, 0); assert.equal(s.errors.length, 0);
   }
+});
+test('購読解除は送信を中断し、古いHTTP応答を新しい購読者へ渡さない', async t => {
+  let finish; let signal;
+  const s = setup(t, (_url, options) => { signal = options.signal; return new Promise(resolve => { finish = resolve; }); });
+  const command = s.command('timer.start'); const sending = s.transport.send(command); s.stop(); assert.equal(signal.aborted, true);
+  const stopNew = s.transport.subscribe(() => assert.fail('old response'), () => assert.fail('old error')); t.after(stopNew);
+  finish(Response.json(snapshot(board(), 0, { type: 'command.accepted', commandType: 'timer.start', requestId: command.requestId, clientId: 'client', changed: true })));
+  await sending; assert.equal(s.events.length, 0);
+});
+test('SSE切断はクライアントをオフラインにする', async t => {
+  const service = createBoardService([board()]); const { client, streams } = connectedClient(service, identity);
+  t.after(() => { client.disconnect(); service.dispose(); }); client.connect(); await until(() => client.getSnapshot().status === 'ready');
+  streams[0].onerror(); assert.equal(client.getSnapshot().status, 'offline'); assert.equal(streams[0].closed, true);
 });
