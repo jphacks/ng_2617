@@ -1,3 +1,5 @@
+
+/* ===== 竜巻 ===== */
 .storm-overlay {
   position: absolute;
   inset: 0;
@@ -9,11 +11,12 @@
 
 .storm-image {
   position: absolute;
-  top: -100;
+  top: -100px;
   left: 0;
   width: 150%;
   height: 130%;
   object-fit: contain;
+  user-select: none;
   animation: storm-wobble 0.2s linear infinite alternate;
 }
 
@@ -31,6 +34,66 @@
   to { rotate: 2deg; }
 }
 
+/* 大きな白紙の付箋 */
+.flying-notes {
+  position: absolute;
+  inset: 0;
+  z-index: 10000;
+  overflow: hidden;
+  pointer-events: none;
+  perspective: 900px;
+}
+
+.flying-note {
+  position: absolute;
+  top: -35%;
+  left: 50%;
+  width: min(28vw, 260px);
+  aspect-ratio: 1.15 / 1;
+  background: #fff8a8;
+  border: 1px solid rgba(110, 95, 40, 0.2);
+  border-radius: 3px;
+  box-shadow: 8px 14px 24px rgba(0, 0, 0, 0.2);
+  opacity: 0;
+  transform-origin: center;
+  animation: note-fall 3.8s ease-in-out both;
+}
+
+@keyframes note-fall {
+  /* 画面上から登場 */
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -40vh) rotateZ(0deg);
+  }
+
+  10% {
+    opacity: 1;
+  }
+
+  /* 1回目：右へ大きく移動 */
+  35% {
+    transform: translate(calc(-50% + 120px), 15vh) rotateZ(12deg);
+  }
+
+  /* 2回目：左へ大きく移動 */
+  60% {
+    transform: translate(calc(-50% - 120px), 55vh) rotateZ(-12deg);
+  }
+
+  /* 揺れを止めて下へ */
+  78% {
+    opacity: 1;
+    transform: translate(-50%, 90vh) rotateZ(0deg);
+  }
+
+  /* 画面外まで落下 */
+  100% {
+    opacity: 0;
+    transform: translate(-50%, 170vh) rotateZ(8deg);
+  }
+}
+
+/* ===== 画面の暗転 ===== */
 .storm-dark-overlay {
   position: absolute;
   inset: 0;
