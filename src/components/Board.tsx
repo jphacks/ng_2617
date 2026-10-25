@@ -11,11 +11,13 @@ import './matching.css';
 import { createBoardClient, type BoardClient, type BoardClientState } from '@/client/board-client';
 import { createHttpBoardTransport } from '@/client/http-board-transport';
 import { useBoardClient } from '@/client/use-board-client';
+import { useMeasuredNodes } from '@/client/use-measured-nodes';
 import { generatedGuidance } from '@/client/generated-guidance';
 import { CARD_SIZES, createEmptyCard, newArrowId, objectKey, getCard, sameObjectId, type BoardObjectId, type Card, type CardId, type RelationLevel } from '@/domain/board';
 import { validAnchor } from '@/domain/board-validation';
 import { BoardCard, BoardContext, previewCard, type BoardNode } from './BoardCard';
 import { ImportBoardDialog } from './ImportBoardDialog';
+import { BoardSettingsDialog } from './BoardSettingsDialog';
 import { BoardNotice } from './BoardNotice';
 import type { BoardFile } from '@/domain/board-file';
 import { downloadBoardJson, readBoardFile } from '@/client/board-file';
@@ -57,7 +59,7 @@ export function Board({ boardId }: { boardId: string }) {
     // ブラウザの識別情報はマウント後に読み込む。SSRと初回描画は同じ読み込み表示にする。
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setClient(instance);
-    return () => instance.disconnect();
+    return () => instance.scheduleLeave();
   }, [boardId]);
   return client ? <ReactFlowProvider><ConnectedBoard key={boardId} client={client} /></ReactFlowProvider>
     : <div className="board-loading" role="status">ボードを準備中…</div>;
@@ -76,6 +78,7 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
   const [color, setColor] = useState(COLORS[0]);
   const [noteOptions, setNoteOptions] = useState(false);
   const [menu, setMenu] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [aiPanel, setAiPanel] = useState(false);
   const [help, setHelp] = useState(false);
   const [level, setLevel] = useState<RelationLevel>('mid');
@@ -94,8 +97,7 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
   const editing = edit.phase !== 'idle';
   const generating = state.generation.status === 'running';
   const board = state.board;
-  const [showStorm, setShowStorm] = useState(false);
-  const [stormKey, setStormKey] = useState(0);
+  const stormEvent = state.latestGenerationEvent;
   const selection = useMemo(() => {
     const existing = new Set([...(board?.cards.map(card => objectKey(card.cardId)) ?? []),
       ...(board?.arrows.map(arrow => objectKey(arrow.arrowId)) ?? [])]);
@@ -113,7 +115,7 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
     });
     observer.observe(surface.current); return () => observer.disconnect();
   }, []);
-  const nodes: BoardNode[] = useMemo(() => {
+  const boardNodes: BoardNode[] = useMemo(() => {
     if (!board) return [];
     const provisional = state.pendingCommands.flatMap(command => command.type === 'card.create' && !getCard(board, command.card.cardId) ? [command.card] : []);
     return [...board.cards, ...provisional].map(saved => {
@@ -125,6 +127,7 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
       draggable: ready && !relatedTarget && tool === 'select' && (!saved.editingUser || ownTransform) &&
         (edit.phase === 'idle' || (ownTransform && edit.intent === 'editing')) };
   }); }, [board, state, edit, selection, ready, relatedTarget, tool]);
+  const { nodes, onNodesChange: recordMeasurements } = useMeasuredNodes(boardNodes);
   const edges: Edge[] = board?.arrows.map(arrow => ({ id: objectKey(arrow.arrowId), source: objectKey(arrow.sourceCardId),
     target: objectKey(arrow.targetCardId), sourceHandle: arrow.sourceAnchor, targetHandle: arrow.targetAnchor,
     selected: selection.has(objectKey(arrow.arrowId)), type: 'smoothstep', markerEnd: { type: MarkerType.ArrowClosed, color: '#64748b' },
@@ -145,6 +148,8 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
     : (board?.cards.filter(card => card.cardKind === 'word' && card.text.trim()).length ?? 0) < 2 ? '本文のある通常付箋を2枚以上用意してください。'
     : state.pendingCommands.length || importPending || readingFile || candidate ? '処理が完了してから開始できます。' : null;
   const syncError = state.importState.status === 'rejected' && state.error === state.importState.message ? null : state.error;
+  const syncNoticeId = syncError ? `error:${state.errorSequence}`
+    : `connection:${state.status}:${state.pendingCommands.map(command => command.requestId).join(',')}`;
   function exportFile(kind: 'json' | 'svg') {
     if (!board || fileBusy) return;
     try {
@@ -214,6 +219,7 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
     window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
   });
   function onNodesChange(changes: NodeChange<BoardNode>[]) {
+    recordMeasurements(changes);
     const selected = changes.filter(change => change.type === 'select');
     if (selected.length) setSelection(previous => {
       const next = new Set(previous); for (const change of selected) if (change.type === 'select') {
@@ -301,7 +307,7 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
       </ReactFlow>}
       {!board && <div className="board-loading" role="status">{state.status === 'offline' ? 'ボードに接続できませんでした' : 'ボードを読み込み中…'}</div>}
       {ready && board && !board.cards.length && <div className="empty-board"><b>最初のアイデアを置いてみましょう</b><p>左の「付箋を追加」から配置できます。</p></div>}
-      <header className="board-brand panel"><Link href="/" aria-label="ルーム一覧へ">◈</Link><div><strong>Idea Board</strong><small>ルーム：{state.identity.boardId}</small></div>
+      <header className="board-brand panel"><Link href="/" onNavigate={() => client.leave()} aria-label="ルーム一覧へ">◈</Link><div><strong>Idea Board</strong><small>ルーム：{state.identity.boardId}</small></div>
         <span className={`connection-dot ${ready ? 'connected' : ''}`} title={ready ? '同期中' : '未接続'} />
       </header>
       <nav className="board-toolbar panel" aria-label="ボードのツール">
@@ -330,6 +336,9 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
         </div>
         <button className="menu-toggle panel" type="button" aria-label="メニュー" aria-expanded={menu} onClick={() => setMenu(!menu)}>☰</button>
         {menu && <div className="board-menu panel">
+          <button type="button" onClick={() => { setSettingsOpen(true); setMenu(false); }}>ボード設定</button>
+          {state.status === 'offline' && <button type="button" onClick={() => { client.connect(); setMenu(false); }}>再接続</button>}
+          {ready && state.error && state.pendingCommands.length > 0 && <button type="button" onClick={() => { client.retryPending(); setMenu(false); }}>元の要求を再送</button>}
           <button type="button" disabled={fileBusy || !board} onClick={() => exportFile('json')}>JSONで保存</button>
           <button type="button" disabled={fileBusy || !board} onClick={() => exportFile('svg')}>SVGで出力</button>
           <button type="button" disabled={fileBusy} onClick={() => fileInput.current?.click()}>JSONを読み込む</button>
@@ -341,21 +350,25 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
       <input ref={fileInput} type="file" accept=".json,application/json" aria-label="読み込むボードのJSONファイル" hidden
         onChange={event => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; void selectFile(file); }} />
       {candidate && <ImportBoardDialog candidate={candidate} onCancel={() => setCandidate(null)} onConfirm={confirmImport} />}
-      {fileMessage && <BoardNotice noticeId={fileMessage} persistent={fileMessage.error}
+      {settingsOpen && <BoardSettingsDialog enabled={board?.settings?.autoGenerationEnabled ?? true}
+        pending={state.pendingCommands.some(command => command.type === 'board.settings.update')} ready={ready}
+        onChange={autoGenerationEnabled => { client.execute({ type: 'board.settings.update', autoGenerationEnabled }); }}
+        onClose={() => setSettingsOpen(false)} />}
+      {fileMessage && <BoardNotice noticeId={fileMessage} onDismiss={() => setFileMessage(null)}
         className="file-message panel" role={fileMessage.error ? 'alert' : 'status'}>{fileMessage.text}</BoardNotice>}
       {state.matchingNotice && <BoardNotice noticeId={state.matchingNotice} className="matching-end-notice panel" role="status">{state.matchingNotice}</BoardNotice>}
-      {!fileMessage && readingFile && <div className="file-message panel" role="status">ファイルを確認中…</div>}
+      {!fileMessage && readingFile && <BoardNotice noticeId="file-reading" className="file-message panel">ファイルを確認中…</BoardNotice>}
       {state.importState.status !== 'idle' && <BoardNotice
         noticeId={`import:${state.importState.requestId}:${state.importState.status}`}
-        persistent={state.importState.status !== 'succeeded'} hidden={!!fileMessage || readingFile || !!candidate}
+        hidden={!!fileMessage || readingFile || !!candidate}
         className="file-message panel" role={state.importState.status === 'rejected' ? 'alert' : 'status'}>
         {state.importState.status === 'pending' ? '読み込み結果を確認中です。通信が切れた場合も元の要求で再確認します。' : state.importState.message}
       </BoardNotice>}
-      {(syncError || !ready || state.pendingCommands.length > 0) && <div className="sync-message panel" role={syncError ? 'alert' : 'status'}>
+      {(syncError || !ready || state.pendingCommands.length > 0) && <BoardNotice noticeId={syncNoticeId} className="sync-message panel" role={syncError ? 'alert' : 'status'}>
         <span>{syncError || (ready ? `${state.pendingCommands.length}件の応答を確認中…` : state.status === 'loading' ? 'サーバーに接続中…' : '接続が切れています。')}</span>
         {state.status === 'offline' && <button type="button" onClick={client.connect}>再接続</button>}
         {ready && state.error && state.pendingCommands.length > 0 && <button type="button" onClick={client.retryPending}>元の要求を再送</button>}
-      </div>}
+      </BoardNotice>}
       {editing && edit.mode === 'text' && <div className="edit-actions panel">
         <span>{edit.phase === 'requesting' ? '編集許可を確認中' : edit.phase === 'saving' ? '保存中…' : edit.phase === 'cancelling' ? '取消中…' : '下書きを編集中'}</span>
         <button type="button" className="primary" disabled={edit.phase !== 'editing'} onClick={() => { setRelatedTarget(null); client.commitEdit(); }}>確定</button>
@@ -372,11 +385,10 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
         <p>関連性の度合い</p>
         {([['low', '低', '元の単語から遠い'], ['mid', '中', '同じジャンルの関連語'], ['high', '高', '強く関連する単語']] as const).map(([value, label, description]) =>
           <button type="button" className="level-option" key={value} aria-pressed={level === value} disabled={generating} onClick={() => setLevel(value)}><b>{label}</b><small>{description}</small></button>)}
-        <button type="button" className="primary generate-button" disabled={!ready || generating} onClick={() => { setStormKey((key) => key + 1); setShowStorm(true);client.execute({ type: 'generation.request', level });}}>{generating ? '候補を生成中…' : '単語を生成'}</button>
+        <button type="button" className="primary generate-button" disabled={!ready || generating} onClick={() => client.execute({ type: 'generation.request', level })}>{generating ? '候補を生成中…' : '単語を生成'}</button>
         <small className="muted">現在はモックの候補語を使用しています。</small>
       </aside>}
       {state.generation.status !== 'idle' && <BoardNotice noticeId={`generation:${state.generation.generationId}:${state.generation.status}`}
-        persistent={state.generation.status === 'running' || state.generation.status === 'failed'}
         className={`generation-message panel ${state.generation.status}`} role={state.generation.status === 'failed' ? 'alert' : 'status'}>
         {state.generation.status === 'running' ? '✦ ボードから候補語を生成中…' : state.generation.message}
       </BoardNotice>}
@@ -384,15 +396,15 @@ function BoardCanvas({ client, state }: { client: BoardClient; state: BoardClien
         <p>本文欄をクリックして編集。Enterで改行、空白をタップかCtrl / ⌘＋Enterで確定、Escapeで取消します。</p>
         <p>上部のつまみで移動。Shiftで複数選択し、まとめて移動できます。選択したカードの四隅でサイズを変更します。</p>
         <p>関連カードには通常付箋・関連カードの両方を関連付けできます。選択中のEscapeは関連先の選択だけを中止します。</p>
-        <p>リアクション・矢印・タイマーは全員に同期します。全員の編集終了から30秒後に候補が追加されます。</p>
+        <p>リアクション・矢印・タイマーは全員に同期します。自動生成がONの場合、全員の編集終了から30秒後に候補が追加されます。右上メニューの「ボード設定」で切り替えられます。</p>
         <p>通常付箋が2枚以上あれば「神経衰弱をはじめる」で開始。選択とアイデア入力は各10秒。1人でも遊べて、書いたアイデアはボードに残ります。</p>
       </aside>}
-      {showStorm && (
+      {stormEvent && (
         <>
           <div className="storm-dark-overlay" />
           <StormAnimation
-            key={stormKey}
-            onComplete={() => setShowStorm(false)}
+            key={stormEvent.eventId}
+            onComplete={() => client.acknowledgeGenerationEvent(stormEvent.eventId)}
           />
         </>
       )}

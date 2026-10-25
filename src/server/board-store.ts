@@ -8,4 +8,6 @@ const service = processStore.integratedBoardService ??= createBoardService([crea
 // HMR後も旧サービスが残る場合、未対応の読み込みを通常の400として扱わない。
 export const supportsBoardImport = service.supportsBoardImport === true;
 export const supportsMatching = service.supportsMatching === true;
+export const supportsBoardSettings = service.supportsBoardSettings === true;
+export const supportsBoardLeave = service.supportsBoardLeave === true;
 export const { getBoardSnapshot, ensureBoard, executeCommand, executeEdit, requestEdit, commitEdit, cancelEdit, replyToEditCheck, subscribeBoard } = service;

@@ -1,6 +1,6 @@
 import { readBoardRequest } from '@/server/board-request';
 import { connection } from 'next/server';
-import { getBoardSnapshot, executeCommand, ensureBoard, supportsBoardImport, supportsMatching } from '@/server/board-store';
+import { getBoardSnapshot, executeCommand, ensureBoard, supportsBoardImport, supportsMatching, supportsBoardSettings, supportsBoardLeave } from '@/server/board-store';
 import { record } from '@/domain/board-validation';
 
 export async function GET(
@@ -36,6 +36,12 @@ export async function POST(
   if (record(parsed.value) && typeof parsed.value.type === 'string' && parsed.value.type.startsWith('matching.') && !supportsMatching) {
     return Response.json({ code: 'SERVER_RESTART_REQUIRED',
       error: '開発サーバーに神経衰弱未対応の旧処理が残っています。必要なボードをJSON保存し、開発サーバーを再起動してページを再読み込みしてください。' },
+    { status: 503, headers });
+  }
+  if (record(parsed.value) && ((parsed.value.type === 'board.settings.update' && !supportsBoardSettings) ||
+      (parsed.value.type === 'board.leave' && !supportsBoardLeave))) {
+    return Response.json({ code: 'SERVER_RESTART_REQUIRED',
+      error: '開発サーバーにボード設定・退室処理に未対応の旧処理が残っています。必要なボードをJSON保存し、開発サーバーを再起動してページを再読み込みしてください。' },
     { status: 503, headers });
   }
   const { boardId } = await params;

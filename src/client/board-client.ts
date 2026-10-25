@@ -26,17 +26,19 @@ export type MatchingInput = Readonly<{
 }>;
 export type BoardClientState = Readonly<{
   importState: ImportState; identity: ClientIdentity; status: 'offline' | 'loading' | 'ready'; board: Board | null; revision: number;
-  edit: EditState; error: string | null; generation: GenerationState; generationSequence: number;
+  edit: EditState; error: string | null; errorSequence: number; generation: GenerationState; generationSequence: number;
   generatedCardIds: readonly CardId[]; pendingCommands: readonly BoardCommand[]; serverOffsetMs: number;
   matchingInput: MatchingInput | null; matchingNotice: string | null;
+  latestGenerationEvent: Readonly<{ eventId: string }> | null;
 }>;
 
 /** 1端末の確定状態・許可待ちの仮表示・許可済み下書きを分離する。 */
 export function createBoardClient(identity: ClientIdentity, transport: BoardTransport, createRequestId = () => randomUUID()) {
+  identity = { ...identity };
   let state: BoardClientState = {
-    importState: { status: 'idle' }, identity: { ...identity }, status: 'offline', board: null, revision: -1, edit: { phase: 'idle' }, error: null,
+    importState: { status: 'idle' }, identity: { ...identity }, status: 'offline', board: null, revision: -1, edit: { phase: 'idle' }, error: null, errorSequence: 0,
     generation: { status: 'idle' }, generationSequence: -1, generatedCardIds: [], pendingCommands: [], serverOffsetMs: 0,
-    matchingInput: null, matchingNotice: null,
+    matchingInput: null, matchingNotice: null, latestGenerationEvent: null,
   };
   const listeners = new Set<() => void>();
   const pending = new Map<string, BoardCommand>();
@@ -45,11 +47,18 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
   let unsubscribe: (() => void) | undefined;
   let connectionGeneration = 0;
   let active = false;
+  let hasConnected = false;
+  let departed = false;
+  let leaveGeneration = 0;
+  let generationBaselineRevision = -1;
   let lastServerTime = -Infinity;
   const buffered: BoardEvent[] = [];
   const sameIds = (a: readonly CardId[], b: readonly CardId[]) => a.length === b.length && a.every(id => b.some(other => sameObjectId(id, other)));
 
   function publish(update: Partial<BoardClientState>) {
+    if (update.error && update.errorSequence === undefined && (!('board' in update) || update.error !== state.error)) {
+      update = { ...update, errorSequence: state.errorSequence + 1 };
+    }
     state = { ...state, ...update, pendingCommands: [...pending.values()].map(command => structuredClone(command)) };
     listeners.forEach(listener => listener());
   }
@@ -60,7 +69,7 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
     active = false; connectionGeneration++;
     unsubscribe?.(); unsubscribe = undefined;
     retainImport(); answeredChecks.clear(); buffered.length = 0;
-    publish({ status: 'offline', edit: { phase: 'idle' }, error: reason, generatedCardIds: [] });
+    publish({ status: 'offline', edit: { phase: 'idle' }, error: reason, generatedCardIds: [], latestGenerationEvent: null });
   }
   function send(command: BoardCommand) {
     const generation = connectionGeneration;
@@ -72,7 +81,7 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
         publish({ importState: { status: 'rejected', requestId: command.requestId, message: error.message }, error: error.message });
         return;
       }
-      if (command.type.startsWith('matching.') && error instanceof BoardRequestRejectedError) {
+      if ((command.type.startsWith('matching.') || command.type === 'board.settings.update') && error instanceof BoardRequestRejectedError) {
         pending.delete(command.requestId); publish({ error: error.message }); return;
       }
       // HTTP失敗は拒否・切断ではない。SSEと確定/取消の最終内容を残す。
@@ -154,6 +163,7 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
     if (initializing || value.serverNow > lastServerTime) { lastServerTime = value.serverNow; serverOffsetMs = value.serverNow - Date.now(); }
     let edit = state.edit;
     let error = state.error;
+    let newError = false;
     let importState = state.importState;
     const ownReply = 'requestId' in value && value.clientId === identity.clientId;
     const pendingCommand = ownReply ? pending.get(value.requestId) : undefined;
@@ -167,9 +177,9 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
     if (value.type === 'edit.granted' && matches && edit.phase === 'requesting' && sameIds(value.cardIds, edit.cardIds)) {
       const granted = grant(edit, value.lockId, board);
       if (granted) { edit = granted; finishAfterGrant = edit.intent !== 'editing'; error = null; }
-      else { edit = { phase: 'idle' }; error = 'この編集権は終了しています。最新のカードから編集を開始してください。'; }
+      else { edit = { phase: 'idle' }; error = 'この編集権は終了しています。最新のカードから編集を開始してください。'; newError = true; }
     } else if (value.type === 'command.rejected' && ownReply && pendingCommand) {
-      error = value.reason;
+      error = value.reason; newError = true;
       if (matches && edit.phase !== 'idle') {
         edit = edit.lockId && edit.cardIds.every(id => getCard(board!, id)?.editingUser?.userId === identity.userId)
           ? { ...edit, phase: 'editing', intent: 'editing', finalChanges: undefined } : { phase: 'idle' };
@@ -181,7 +191,7 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
       if (value.outcome !== 'saved') { edit = { phase: 'idle' }; error = null; }
     } else if (value.type === 'edit.released' && value.clientId === identity.clientId && value.userId === identity.userId &&
         edit.phase !== 'idle' && value.lockId === edit.lockId && sameIds(value.cardIds, edit.cardIds)) {
-      edit = { phase: 'idle' }; error = '期限確認への応答が届かなかったため、編集権が解除されました。';
+      edit = { phase: 'idle' }; error = '期限確認への応答が届かなかったため、編集権が解除されました。'; newError = true;
     } else if (value.type === 'command.accepted' && pendingCommand) error = null;
 
     // 読み込みで消えたIDに対する取得待ち・保存待ちも終了する。
@@ -191,7 +201,7 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
       const currentEdit = edit;
       const bases = { ...edit.bases }; const drafts = { ...edit.drafts };
       if (!edit.cardIds.every(id => getCard(board!, id)?.editingUser?.userId === identity.userId)) {
-        edit = { phase: 'idle' }; error = '編集権が終了しました。最新の内容を確認してください。';
+        edit = { phase: 'idle' }; error = '編集権が終了しました。最新の内容を確認してください。'; newError = true;
       } else {
         for (const id of currentEdit.cardIds) {
           const key = objectKey(id); const base = cardContent(getCard(board, id)!);
@@ -207,12 +217,19 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
       }
     }
     let generatedCardIds = state.generatedCardIds.filter(id => getCard(board!, id));
-    if (initializing) { seenGenerationEvents.clear(); generatedCardIds = []; }
+    let latestGenerationEvent = state.latestGenerationEvent;
+    if (initializing) {
+      seenGenerationEvents.clear(); generatedCardIds = []; latestGenerationEvent = null;
+      generationBaselineRevision = value.revision;
+    }
     if (value.type === 'board.cards-generated' && !seenGenerationEvents.has(value.eventId)) {
       seenGenerationEvents.add(value.eventId);
-      generatedCardIds = [...new Map([...generatedCardIds, ...value.generatedCardIds.filter(id => getCard(board!, id))].map(id => [objectKey(id), id])).values()];
+      const added = value.generatedCardIds.filter(id => getCard(board!, id));
+      generatedCardIds = [...new Map([...generatedCardIds, ...added].map(id => [objectKey(id), id])).values()];
+      if (added.length && value.revision > generationBaselineRevision) latestGenerationEvent = { eventId: value.eventId };
     }
     const game = board.matching;
+    if (game) latestGenerationEvent = null;
     const ownDraft = game?.drafts.find(draft => draft.userId === identity.userId && draft.writerClientId === identity.clientId);
     let matchingInput = state.matchingInput;
     if (!game || !ownDraft) matchingInput = null;
@@ -240,7 +257,8 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
         }
       }
     }
-    publish({ importState, status: 'ready', board, revision, edit, error, generation, generationSequence, generatedCardIds, serverOffsetMs, matchingInput, matchingNotice });
+    publish({ importState, status: 'ready', board, revision, edit, error, errorSequence: state.errorSequence + (newError ? 1 : 0),
+      generation, generationSequence, generatedCardIds, serverOffsetMs, matchingInput, matchingNotice, latestGenerationEvent });
     if (initializing && game && matchingInput && ownDraft && !ownDraft.finalized && matchingInput.sequence > ownDraft.sequence &&
         ((game.step === 'writing' && board.timer.state === 'running' && board.timer.endsAt > Date.now() + serverOffsetMs) ||
           (game.step === 'closing' && matchingInput.finalRequested))) {
@@ -260,11 +278,31 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
       }
     }
   }
+  function leave() {
+    if (!hasConnected || departed) return;
+    departed = true; leaveGeneration++;
+    // 退室は購読と独立したkeepalive送信。直後の通信終了でも解除要求を中断しない。
+    const command: BoardCommand = { ...identity, type: 'board.leave', requestId: createRequestId() };
+    try { Promise.resolve(transport.send(command)).catch(() => {}); } catch { /* 未達時はサーバーの期限解除が回収する。 */ }
+    pending.clear(); offline(null);
+  }
+  function scheduleLeave() {
+    const generation = ++leaveGeneration;
+    // StrictModeのeffect再実行では次のconnectが退室を取り消す。
+    queueMicrotask(() => { if (generation === leaveGeneration) leave(); });
+  }
   function connect() {
+    leaveGeneration++;
     if (active) return;
+    if (departed) {
+      identity = { ...identity, clientId: randomUUID() };
+      departed = false;
+      publish({ identity: { ...identity } });
+    }
+    hasConnected = true;
     active = true; const generation = ++connectionGeneration;
     retainImport(); answeredChecks.clear(); seenGenerationEvents.clear(); buffered.length = 0;
-    publish({ status: 'loading', edit: { phase: 'idle' }, error: null, generatedCardIds: [] });
+    publish({ status: 'loading', edit: { phase: 'idle' }, error: null, generatedCardIds: [], latestGenerationEvent: null });
     try {
       const stop = transport.subscribe(value => { if (active && generation === connectionGeneration) receive(value); },
         reason => { if (active && generation === connectionGeneration) offline(reason); });
@@ -276,7 +314,7 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
   return {
     getSnapshot: () => state,
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    connect, disconnect: () => offline(null),
+    connect, leave, scheduleLeave, disconnect: () => offline(null),
     requestEdit(ids: CardId | readonly CardId[], mode: 'text' | 'transform' = 'text'): boolean {
       if (state.status !== 'ready' || state.importState.status === 'pending' || state.edit.phase !== 'idle' || !state.board || state.board.matching) return false;
       const cardIds = Array.isArray(ids) ? ids : [ids as CardId];
@@ -321,7 +359,7 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
     },
     execute(operation: ImmediateOperation): boolean {
       if (state.status !== 'ready' || state.importState.status === 'pending') return false;
-      if (state.board?.matching && !operation.type.startsWith('matching.')) return false;
+      if (state.board?.matching && !operation.type.startsWith('matching.') && operation.type !== 'board.settings.update') return false;
       if (operation.type === 'board.import' && (state.edit.phase !== 'idle' || pending.size > 0)) return false;
       const requestId = createRequestId();
       if (operation.type === 'board.import') publish({ importState: { status: 'pending', requestId }, error: null });
@@ -343,6 +381,9 @@ export function createBoardClient(identity: ClientIdentity, transport: BoardTran
       publish({}); return true;
     },
     retryPending() { for (const command of [...pending.values()]) send(command); },
+    acknowledgeGenerationEvent(eventId: string) {
+      if (state.latestGenerationEvent?.eventId === eventId) publish({ latestGenerationEvent: null });
+    },
     dismissGuidance(cardIds: readonly CardId[]) {
       const dismissed = new Set(cardIds.map(objectKey));
       publish({ generatedCardIds: state.generatedCardIds.filter(id => !dismissed.has(objectKey(id))) });

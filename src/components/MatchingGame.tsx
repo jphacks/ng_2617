@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { BoardClient, BoardClientState } from '@/client/board-client';
 import { MATCHING_DURATION_MS } from '@/domain/matching';
 import { MatchingTextInput } from './MatchingTextInput';
+import { BoardNotice } from './BoardNotice';
 
 function AbortDialog({ ready, onContinue, onEnd }: { ready: boolean; onContinue: () => void; onEnd: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
@@ -46,7 +47,7 @@ export function MatchingGame({ client, state }: { client: BoardClient; state: Bo
 
   return <main className="matching-screen">
     <header className="matching-header">
-      <div className="matching-brand"><Link href="/" aria-label="ルーム一覧へ">◈</Link>
+      <div className="matching-brand"><Link href="/" aria-label="ルーム一覧へ" onNavigate={client.leave}>◈</Link>
         <div><strong>Idea Board <span>神経衰弱</span></strong><small>ルーム：{state.identity.boardId}</small></div>
       </div>
       <div className="matching-stage" role="status" aria-live="polite">{stage}</div>
@@ -55,18 +56,21 @@ export function MatchingGame({ client, state }: { client: BoardClient; state: Bo
           <small>{game.step === 'selecting' ? '単語を選択' : 'アイデア入力'}</small>
           <span aria-live="off">{Math.ceil(remaining / 1000)}<small>秒</small></span>
         </div>
-        <span className={`connection-dot ${ready ? 'connected' : ''}`} role="img" aria-label={ready ? '接続中' : '未接続'} />
+        {state.status === 'offline' ? <button type="button" className="connection-dot" aria-label="再接続" title="再接続"
+          style={{ border: 0, padding: 0 }} onClick={client.connect} />
+          : <span className={`connection-dot ${ready ? 'connected' : ''}`} role="img" aria-label={ready ? '接続中' : '接続中…'} />}
         <button type="button" className="matching-abort" disabled={!ready || !!game.abortConfirmationId || game.finishAfterClosing}
           onClick={() => client.execute({ type: 'matching.abort.request', gameId: game.gameId })}>ゲームを中断</button>
       </div>
       <div className="matching-time-track" aria-hidden="true"><div style={{ width: `${remaining / MATCHING_DURATION_MS * 100}%` }} /></div>
     </header>
 
-    {(!ready || state.error) && <div className="matching-connection panel" role="alert">
+    {(!ready || state.error) && <BoardNotice noticeId={`connection:${state.status}:${state.errorSequence}`}
+      className="matching-connection panel" role="alert">
       <span>{state.error || (state.status === 'loading' ? '再接続中…' : '接続が切れています。本文はこの端末に保持しています。')}</span>
       {state.status === 'offline' && <button type="button" className="primary" onClick={client.connect}>再接続</button>}
       {ready && state.error && state.pendingCommands.length > 0 && <button type="button" onClick={client.retryPending}>元の要求を再送</button>}
-    </div>}
+    </BoardNotice>}
 
     {game.step === 'selecting' ? <section className="matching-selection" aria-labelledby="matching-select-title">
       <div className="matching-intro"><p className="matching-eyebrow">WORD COMBINATION</p>
@@ -87,7 +91,7 @@ export function MatchingGame({ client, state }: { client: BoardClient; state: Bo
           </button> : <div key={index} className="matching-empty-slot" aria-hidden="true" />;
         })}
       </div>
-      <p className="matching-notice" role="status" key={game.turnId}>{game.notice}</p>
+      {game.notice && <BoardNotice noticeId={`matching:${game.turnId}:${game.notice}`} className="matching-notice">{game.notice}</BoardNotice>}
       <p className="matching-footnote">選び直しはできません。2枚選ぶと、10秒のアイデア入力が始まります。</p>
     </section> : <section className="matching-writing" aria-label="アイデアを入力">
       <div className="matching-workspace">

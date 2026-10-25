@@ -61,6 +61,14 @@ export function createHttpBoardTransport(fetcher: typeof fetch = fetch,
       };
     },
     async send(command) {
+      if (command.type === 'board.leave') {
+        // ページ離脱でも送信を継続し、購読解除のAbortControllerから独立させる。
+        await fetcher(`/api/boards/${encodeURIComponent(command.boardId)}`, {
+          method: 'POST', cache: 'no-store', keepalive: true,
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(command),
+        });
+        return;
+      }
       const current = subscription;
       if (!current) throw new Error('受信を購読してから送信してください。');
       if (command.type === 'board.get') { openStream(current, command); return; }
@@ -72,7 +80,7 @@ export function createHttpBoardTransport(fetcher: typeof fetch = fetch,
           headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(command),
         });
         const value: unknown = await response.json();
-        if ((command.type === 'board.import' || command.type.startsWith('matching.')) && response.status === 503 && record(value) &&
+        if ((command.type === 'board.import' || command.type === 'board.settings.update' || command.type.startsWith('matching.')) && response.status === 503 && record(value) &&
             value.code === 'SERVER_RESTART_REQUIRED' && typeof value.error === 'string' && value.error.length <= 1000) {
           throw new BoardRequestRejectedError(value.error);
         }
