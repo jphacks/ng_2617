@@ -1,337 +1,177 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createBoardClient } from './board-client.ts';
+import { createBoardService } from '../server/board-service.ts';
+import { getCard, objectKey } from '../domain/board.ts';
+import { board, cid, commands as commandFactory, identity, snapshot, word } from '../test/board-fixtures.mjs';
+import { deferred, flush } from '../test/fake-clock.mjs';
 
-const identity = { boardId: 'board-1', userId: 'user-1', clientId: 'client-1' };
-const card = {
-  cardId: 'card-1', shape: 'rectangle', position: { x: 0, y: 0, z: 0 },
-  color: '#ffffff', text: '確定済み', font: 'sans-serif',
-};
-const board = { boardId: identity.boardId, cards: [card] };
-const locked = {
-  ...board, cards: [{ ...card, editingUser: { userId: identity.userId } }],
-};
-
-function setup() {
-  let nextId = 0;
-  const commands = [];
-  const subscriptions = [];
-  const transport = {
-    send: (command) => { commands.push(command); },
-    subscribe(onEvent, onDisconnect) {
-      const entry = { onEvent, onDisconnect, stopped: false };
-      subscriptions.push(entry);
-      return () => { entry.stopped = true; };
-    },
-  };
-  const client = createBoardClient(identity, transport, () => `request-${++nextId}`);
-  const emit = (event) => subscriptions.at(-1).onEvent(event);
-  const snapshot = (value = board, revision = 0) =>
-    emit({ type: 'board.snapshot', board: value, revision });
-  const reply = (type, value, revision, extra = {}) => emit({
-    type, board: value, revision, clientId: identity.clientId,
-    cardId: card.cardId, requestId: commands.at(-1).requestId, ...extra,
-  });
-  function grant() {
-    assert.equal(client.requestEdit(card.cardId), true);
-    reply('edit.granted', locked, 1, { lockId: 'lock-1' });
-  }
-  client.connect();
-  snapshot();
-  return { client, transport, commands, subscriptions, emit, snapshot, reply, grant };
+function setup(t) {
+  const sent = []; const subscriptions = []; const service = createBoardService([board()]);
+  t.after(() => service.dispose());
+  const transport = { send(command) { sent.push(command); }, subscribe(onEvent, onDisconnect) {
+    const entry = { onEvent, onDisconnect, stopped: false }; subscriptions.push(entry); return () => { entry.stopped = true; };
+  } };
+  let n = 0; const client = createBoardClient(identity, transport, () => `client-${++n}`);
+  t.after(() => client.disconnect());
+  const emit = event => subscriptions.at(-1).onEvent(event);
+  const deliver = (command = sent.at(-1)) => { const result = service.executeCommand(command); emit(result.body); return result.body; };
+  const current = () => client.getSnapshot();
+  const request = (ids = cid(1), mode = 'text') => { assert.equal(client.requestEdit(ids, mode), true); return sent.at(-1); };
+  const acquire = (ids, mode) => { request(ids, mode); return deliver(); };
+  const draft = (id = cid(1)) => current().edit.drafts[objectKey(id)];
+  const check = (lockId, ids = [cid(1)], extra = {}) => ({ ...service.getBoardSnapshot('board'), type: 'edit.check',
+    userId: identity.userId, clientId: identity.clientId, cardIds: ids, lockId, checkId: 'check', ...extra });
+  client.connect(); emit(service.getBoardSnapshot('board'));
+  return { client, service, transport, sent, subscriptions, emit, deliver, current, request, acquire, draft, check };
 }
 
-test('許可前の編集を防ぎ、下書きと送信を確定済みボードから分離する', () => {
-  const { client, commands, reply } = setup();
-  assert.equal(commands[0].type, 'board.get');
-  assert.equal(client.requestEdit(card.cardId), true);
-  assert.equal(client.requestEdit(card.cardId), false);
-  assert.equal(client.updateDraft({ text: '未許可' }), false);
-  assert.equal(client.commitEdit(), false);
-  reply('edit.granted', locked, 1, { lockId: 'lock-1' });
-  assert.equal(client.updateDraft({ text: '下書き', position: { x: 10, y: 20, z: 1 } }), true);
-  assert.equal(client.getSnapshot().board.cards[0].text, '確定済み');
-  const beforeCommit = client.getSnapshot();
-  assert.equal(client.commitEdit(), true);
-  assert.equal(client.commitEdit(), false);
-  assert.equal(client.updateDraft({ text: '送信後' }), false);
-  assert.equal(client.getSnapshot().board.cards[0].text, '確定済み');
-  assert.equal(commands.at(-1).lockId, 'lock-1');
-  assert.equal(commands.at(-1).content.text, '下書き');
-  assert.equal('editingUser' in commands.at(-1).content, false);
-  reply('edit.committed', { ...board, cards: [{ ...card, text: '下書き' }] }, 2);
-  assert.equal(client.getSnapshot().edit.phase, 'idle');
-  assert.equal(client.getSnapshot().board.cards[0].text, '下書き');
-  assert.equal(client.getSnapshot().error, null);
-  assert.equal(beforeCommit.edit.phase, 'editing');
-  assert.equal(beforeCommit.board.cards[0].text, '確定済み');
+test('許可前は本文編集を防ぎ、下書きと確定済みボードを分離して保存する', t => {
+  const s = setup(t); s.request();
+  assert.equal(s.client.updateDraft({ text: 'not granted' }), false);
+  assert.equal(s.client.requestEdit(cid(2)), false);
+  s.deliver(); assert.equal(s.client.updateDraft({ text: 'draft' }), true);
+  assert.equal(getCard(s.current().board, cid(1)).text, 'word-1');
+  const before = s.current(); s.client.commitEdit(); assert.equal(s.current().edit.phase, 'saving');
+  assert.deepEqual(s.sent.at(-1).changes, [{ cardId: cid(1), patch: { text: 'draft' } }]);
+  assert.equal(s.client.updateDraft({ text: 'after commit' }), false);
+  s.deliver(); assert.equal(s.current().edit.phase, 'idle'); assert.equal(s.current().pendingCommands.length, 0);
+  assert.equal(getCard(s.current().board, cid(1)).text, 'draft'); assert.equal(before.edit.phase, 'editing');
 });
-
-test('同じユーザーの別端末への許可では編集を開始しない', () => {
-  const { client, reply, snapshot } = setup();
-  client.requestEdit(card.cardId);
-  reply('edit.granted', locked, 1, { clientId: 'client-2', lockId: 'other-lock' });
-  assert.equal(client.getSnapshot().edit.phase, 'requesting');
-  reply('edit.rejected', locked, 1, { reason: '別の端末が編集中です' });
-  assert.equal(client.getSnapshot().edit.phase, 'idle');
-  assert.equal(client.getSnapshot().error, '別の端末が編集中です');
-  assert.equal(client.requestEdit(card.cardId), false);
-  snapshot(board, 2);
-  assert.equal(client.requestEdit(card.cardId), true);
+test('複数の仮移動は許可前から表示し、先に離しても許可後に一括確定する', t => {
+  const s = setup(t); const request = s.request([cid(1), cid(2)], 'transform');
+  s.client.updateDraft({ position: { x: 10, y: 20, z: 1 } }, cid(1));
+  s.client.updateDraft({ position: { x: 30, y: 40, z: 2 }, shape: { width: 300, height: 250 } }, cid(2));
+  assert.equal(s.current().edit.phase, 'requesting'); assert.equal(s.draft().position.x, 10);
+  assert.equal(s.client.updateDraft({ text: 'not allowed' }), false);
+  s.client.commitEdit(); assert.equal(s.sent.at(-1).type, 'edit.request');
+  s.deliver(request); assert.equal(s.current().edit.phase, 'saving'); assert.equal(s.sent.at(-1).type, 'edit.commit');
+  s.deliver(); assert.equal(s.current().edit.phase, 'idle'); assert.equal(s.current().revision, 2);
+  assert.equal(getCard(s.current().board, cid(1)).position.x, 10); assert.equal(getCard(s.current().board, cid(2)).shape.width, 300);
 });
-
-test('取消の通知が届くまでは編集権を保持し、下書きを確定しない', () => {
-  const { client, grant, reply, commands } = setup();
-  grant();
-  client.updateDraft({ text: '破棄する下書き' });
-  assert.equal(client.cancelEdit(), true);
-  assert.equal(client.getSnapshot().edit.phase, 'cancelling');
-  assert.equal(commands.at(-1).type, 'edit.cancel');
-  assert.equal(client.requestEdit(card.cardId), false);
-  reply('edit.cancelled', board, 2);
-  assert.equal(client.getSnapshot().edit.phase, 'idle');
-  assert.equal(client.getSnapshot().board.cards[0].text, '確定済み');
-  assert.equal(client.getSnapshot().board.cards[0].editingUser, undefined);
+test('許可待ちの移動量は許可時の最新位置へ合成し、最新本文を上書きしない', t => {
+  const s = setup(t); const request = s.request(cid(1), 'transform');
+  s.client.updateDraft({ position: { x: 260, y: 110, z: 1 } });
+  const grant = s.service.executeCommand(request).body;
+  const latest = { ...grant.board, cards: grant.board.cards.map(card => card.cardId.uuid === cid(1).uuid ? { ...card, position: { x: 300, y: 200, z: 1 }, text: 'latest' } : card) };
+  s.emit(snapshot(latest, 2)); s.emit(grant);
+  assert.equal(s.current().revision, 2); assert.equal(s.current().edit.phase, 'editing');
+  assert.deepEqual(s.draft().position, { x: 310, y: 210, z: 1 }); assert.equal(s.draft().text, 'latest');
 });
-
-test('他ボード・古い更新を無視し、他クライアントの確定を反映する', () => {
-  const { client, snapshot, reply } = setup();
-  const changed = { ...board, cards: [{ ...card, text: '他端末の更新' }] };
-  reply('edit.committed', changed, 5, { clientId: 'client-2' });
-  snapshot(board, 4);
-  snapshot({ ...board, boardId: 'other-board' }, 100);
-  assert.equal(client.getSnapshot().revision, 5);
-  assert.equal(client.getSnapshot().board.cards[0].text, '他端末の更新');
-  changed.cards[0].text = '受信元が後から変更';
-  assert.equal(client.getSnapshot().board.cards[0].text, '他端末の更新');
+test('取得拒否は仮表示を破棄して最新の確定位置へ戻す', t => {
+  const s = setup(t); const request = s.request(cid(1), 'transform'); s.client.updateDraft({ position: { x: 1, y: 2, z: 1 } });
+  const other = commandFactory({ ...identity, clientId: 'other' });
+  const grant = s.service.executeCommand(other('edit.request', { cardIds: [cid(1)] })).body;
+  s.service.executeCommand(other('edit.commit', { lockId: grant.lockId, changes: [{ cardId: cid(1), patch: { position: { x: 500, y: 500, z: 1 } } }] }));
+  s.service.executeCommand(other('edit.request', { cardIds: [cid(1)] }));
+  s.deliver(request); assert.equal(s.current().edit.phase, 'idle'); assert.equal(getCard(s.current().board, cid(1)).position.x, 500);
+  assert.ok(s.current().error);
 });
-
-test('要求IDが違う許可応答と、重複した許可応答は下書きを上書きしない', () => {
-  const { client, reply } = setup();
-  client.requestEdit(card.cardId);
-  reply('edit.granted', locked, 1, { lockId: 'lock-1', requestId: 'old' });
-  assert.equal(client.getSnapshot().edit.phase, 'requesting');
-  reply('edit.granted', locked, 1, { lockId: 'lock-1' });
-  client.updateDraft({ text: '作業中' });
-  reply('edit.granted', locked, 1, { lockId: 'lock-1' });
-  assert.equal(client.getSnapshot().edit.draft.text, '作業中');
+test('許可前の取消は遅い許可を受けた後に取消要求で解除し、移動を確定しない', t => {
+  const s = setup(t); const request = s.request([cid(1), cid(2)], 'transform');
+  s.client.updateDraft({ position: { x: 5, y: 5, z: 1 } }); s.client.cancelEdit(); s.deliver(request);
+  assert.equal(s.sent.at(-1).type, 'edit.cancel'); assert.equal(s.current().edit.phase, 'cancelling');
+  s.deliver(); assert.equal(s.current().edit.phase, 'idle'); assert.equal(getCard(s.current().board, cid(1)).position.x, 250);
 });
-
-test('切断後は編集を止め、古い接続の通知を無視して再取得する', () => {
-  const { client, grant, subscriptions, snapshot, commands } = setup();
-  grant();
-  const previous = subscriptions.at(-1);
-  previous.onDisconnect('接続が切れました');
-  assert.equal(client.getSnapshot().status, 'offline');
-  assert.equal(previous.stopped, true);
-  assert.equal(client.commitEdit(), false);
-  client.connect();
-  assert.equal(client.getSnapshot().status, 'loading');
-  assert.equal(commands.at(-1).type, 'board.get');
-  previous.onEvent({ type: 'board.snapshot', board, revision: 100 });
-  assert.equal(client.getSnapshot().revision, 1);
-  snapshot(board, 2);
-  assert.equal(client.getSnapshot().status, 'ready');
-  assert.equal(client.getSnapshot().edit.phase, 'idle');
-});
-
-test('同期的・非同期的な送信失敗で処理待ち状態に残らない', async () => {
-  for (const fail of [
-    () => { throw new Error('offline'); },
-    () => Promise.reject(new Error('offline')),
-  ]) {
-    const { client, transport } = setup();
-    transport.send = fail;
-    client.requestEdit(card.cardId);
-    await Promise.resolve();
-    assert.equal(client.getSnapshot().status, 'offline');
-    assert.equal(client.getSnapshot().edit.phase, 'idle');
-    assert.ok(client.getSnapshot().error);
-  }
-});
-
-test('古い送信の失敗で再接続後の状態を壊さない', async () => {
-  const { client, transport, snapshot } = setup();
-  let reject;
-  transport.send = () => new Promise((_, fail) => { reject = fail; });
-  client.requestEdit(card.cardId);
-  client.disconnect();
-  transport.send = () => {};
-  client.connect();
-  snapshot(board, 2);
-  reject(new Error('遅れて届く失敗'));
-  await Promise.resolve();
-  assert.equal(client.getSnapshot().status, 'ready');
-});
-
-test('編集権の消失を検出し、状態購読を解除できる', () => {
-  const { client, grant, snapshot } = setup();
-  let calls = 0;
-  const stop = client.subscribe(() => { calls += 1; });
-  grant();
-  assert.ok(calls > 0);
-  snapshot(board, 2);
-  assert.equal(client.getSnapshot().edit.phase, 'idle');
-  assert.ok(client.getSnapshot().error);
-  stop();
-  const before = calls;
-  snapshot(board, 3);
-  assert.equal(calls, before);
-});
-
-test('下書きからIDや編集者を変更できず、不正な座標を拒否する', () => {
-  const { client, grant } = setup();
-  grant();
-  client.updateDraft({ cardId: 'other', editingUser: { userId: 'other' }, text: '' });
-  assert.equal(client.getSnapshot().edit.cardId, card.cardId);
-  assert.equal('editingUser' in client.getSnapshot().edit.draft, false);
-  assert.equal(client.getSnapshot().edit.draft.text, '');
-  assert.equal(client.updateDraft({ position: { x: NaN, y: 0, z: 0 } }), false);
-});
-
-test('自分の応答が新しいスナップショットより遅れた場合、応答待ちに残さない', () => {
-  const { client, snapshot, reply } = setup();
-  client.requestEdit(card.cardId);
-  snapshot(locked, 2);
-  reply('edit.granted', locked, 1, { lockId: 'expired-lock' });
-  assert.equal(client.getSnapshot().status, 'offline');
-  assert.equal(client.getSnapshot().revision, 2);
-  assert.equal(client.getSnapshot().edit.phase, 'idle');
-});
-
-function checkEvent(extra = {}) {
-  return {
-    type: 'edit.check', board: locked, revision: 1, userId: identity.userId,
-    clientId: identity.clientId, cardId: card.cardId, lockId: 'lock-1', checkId: 'check-1', ...extra,
-  };
-}
-
-test('期限確認で未保存の下書きを返し、途中保存の応答で入力中の内容を上書きしない', () => {
-  const { client, grant, emit, reply, commands } = setup();
-  grant();
-  client.updateDraft({ text: '途中保存', position: { x: 10, y: 20, z: 0 } });
-  emit(checkEvent());
-  const sent = commands.at(-1);
-  assert.equal(sent.type, 'edit.check.reply');
-  assert.equal(sent.changed, true);
-  assert.equal(sent.content.text, '途中保存');
-  assert.equal(sent.checkId, 'check-1');
-  assert.equal(client.getSnapshot().edit.phase, 'editing');
-  const count = commands.length;
-  emit(checkEvent());
-  assert.equal(commands.length, count);
-  client.updateDraft({ text: '応答待ちの間の入力' });
-  const saved = { ...locked, cards: [{ ...locked.cards[0], ...sent.content }] };
-  reply('edit.checked', saved, 2, { lockId: 'lock-1', checkId: 'check-1', outcome: 'saved' });
-  assert.equal(client.getSnapshot().board.cards[0].text, '途中保存');
-  assert.equal(client.getSnapshot().edit.draft.text, '応答待ちの間の入力');
-  emit(checkEvent({ board: saved, revision: 2, checkId: 'check-2' }));
-  assert.equal(commands.at(-1).content.text, '応答待ちの間の入力');
-  assert.equal(client.commitEdit(), true);
-});
-
-test('入力を元に戻した下書きは変更なしと返し、サーバー側解除で編集を終了する', () => {
-  const { client, grant, emit, reply, commands } = setup();
-  grant();
-  client.updateDraft({ text: 'temporary' });
-  client.updateDraft({ text: card.text });
-  emit(checkEvent());
-  assert.equal(commands.at(-1).changed, false);
-  assert.equal('content' in commands.at(-1), false);
-  reply('edit.checked', board, 2, { lockId: 'lock-1', checkId: 'check-1', outcome: 'released' });
-  assert.equal(client.getSnapshot().edit.phase, 'idle');
-  assert.equal(client.getSnapshot().error, null);
-});
-
-test('期限確認には端末・ユーザー・カード・ロックが一致した場合だけ返答する', () => {
-  const { client, grant, emit, commands } = setup();
-  grant();
-  const count = commands.length;
-  for (const mismatch of [{ clientId: 'other' }, { userId: 'other' }, { cardId: 'other' }, { lockId: 'old' }]) {
-    emit(checkEvent(mismatch));
-  }
-  assert.equal(commands.length, count);
-  assert.equal(client.getSnapshot().edit.phase, 'editing');
-});
-
-test('確定・取消の送信中は期限確認に返答せず、通常操作の完了を待つ', () => {
+test('HTTPの同期・非同期エラーでもSSE・下書き・最終要求を保持し、同IDで再送する', async t => {
   for (const operation of ['commitEdit', 'cancelEdit']) {
-    const { client, grant, emit, commands } = setup();
-    grant();
-    client[operation]();
-    const count = commands.length;
-    emit(checkEvent());
-    assert.equal(commands.length, count);
-    assert.equal(client.getSnapshot().edit.phase, operation === 'commitEdit' ? 'saving' : 'cancelling');
+    const s = setup(t); const grant = s.acquire(); s.client.updateDraft({ text: 'final' });
+    const job = deferred(); s.transport.send = command => { s.sent.push(command); return job.promise; };
+    s.client[operation](); const original = structuredClone(s.sent.at(-1)); job.reject(new Error('timeout')); await flush();
+    assert.equal(s.current().status, 'ready'); assert.equal(s.subscriptions.at(-1).stopped, false);
+    assert.equal(s.current().edit.phase, operation === 'commitEdit' ? 'saving' : 'cancelling');
+    s.emit(s.check(grant.lockId));
+    assert.equal(s.sent.at(-1).state, operation === 'commitEdit' ? 'committing' : 'cancelling');
+    if (operation === 'commitEdit') assert.equal(s.sent.at(-1).changes[0].patch.text, 'final');
+    s.transport.send = command => s.sent.push(command); s.client.retryPending();
+    assert.deepEqual(s.sent.findLast(command => command.type === original.type), original);
+  }
+  const s = setup(t); s.transport.send = () => { throw new Error('network'); }; s.request();
+  assert.equal(s.current().status, 'ready'); assert.equal(s.current().edit.phase, 'requesting');
+});
+test('新しいボードが先着しても古い個別応答で巻き戻らず、要求完了を判定する', t => {
+  const s = setup(t); const grant = s.acquire(); s.client.updateDraft({ text: 'draft' });
+  s.client.commitEdit(); const result = s.service.executeCommand(s.sent.at(-1)).body;
+  const latest = { ...result.board, timer: { durationMs: 300000, state: 'running', endsAt: 300000 } };
+  s.emit(snapshot(latest, 10)); assert.equal(s.current().edit.phase, 'saving'); s.emit(result);
+  assert.equal(s.current().edit.phase, 'idle'); assert.equal(s.current().revision, 10);
+  assert.equal(s.current().board.timer.state, 'running');
+  s.emit(grant); assert.equal(s.current().edit.phase, 'idle');
+});
+test('途中保存中の後続入力と、元の値に戻す入力を古い応答で失わない', t => {
+  for (const next of ['later input', 'word-1']) {
+    const s = setup(t); const grant = s.acquire(); s.client.updateDraft({ text: 'interim' });
+    s.emit(s.check(grant.lockId)); const reply = s.sent.at(-1);
+    s.client.updateDraft({ text: next });
+    const saved = { ...s.current().board, cards: s.current().board.cards.map(card => card.cardId.uuid === cid(1).uuid ? { ...card, text: 'interim' } : card) };
+    s.emit(snapshot(saved, 2, { type: 'edit.checked', clientId: identity.clientId, requestId: reply.requestId,
+      lockId: grant.lockId, cardIds: [cid(1)], checkId: 'check', outcome: 'saved' }));
+    assert.equal(s.draft().text, next);
+    s.emit(s.check(grant.lockId, [cid(1)], { checkId: 'next', board: saved, revision: 2 }));
+    assert.equal(s.sent.at(-1).changes[0].patch.text, next);
   }
 });
-
-test('別カードの新しい通知が先着しても有効な期限確認には最新の保存内容を基準に返答する', () => {
-  const { client, grant, emit, snapshot, commands } = setup();
-  grant();
-  client.updateDraft({ text: 'new draft' });
-  snapshot({ ...locked, cards: [...locked.cards, { ...card, cardId: 'other' }] }, 3);
-  emit(checkEvent());
-  assert.equal(commands.at(-1).type, 'edit.check.reply');
-  assert.equal(commands.at(-1).content.text, 'new draft');
-  assert.equal(client.getSnapshot().revision, 3);
-  assert.equal(client.getSnapshot().board.cards.length, 2);
+test('問い合わせは端末・ユーザー・対象集合・ロックを照合し、重複返答しない', t => {
+  const s = setup(t); const grant = s.acquire(); const count = s.sent.length;
+  for (const extra of [{ clientId: 'other' }, { userId: 'other' }, { cardIds: [cid(2)] }, { lockId: 'other' }]) s.emit(s.check(grant.lockId, [cid(1)], extra));
+  assert.equal(s.sent.length, count); s.emit(s.check(grant.lockId)); const replyCount = s.sent.length;
+  s.emit(s.check(grant.lockId)); assert.equal(s.sent.length, replyCount);
 });
-
-test('古い問い合わせへの拒否と通常取消後の途中保存応答でロックを復活させない', () => {
-  const { client, grant, emit, reply, commands } = setup();
-  grant();
-  client.updateDraft({ text: 'draft' });
-  emit(checkEvent());
-  const checkReply = commands.at(-1);
-  reply('edit.rejected', locked, 1, { reason: '期限確認終了' });
-  assert.equal(client.getSnapshot().edit.phase, 'editing');
-  client.cancelEdit();
-  reply('edit.cancelled', board, 3);
-  emit({
-    ...checkReply, type: 'edit.checked', outcome: 'saved', revision: 2,
-    board: { ...locked, cards: [{ ...locked.cards[0], text: 'draft' }] },
-  });
-  assert.equal(client.getSnapshot().status, 'ready');
-  assert.equal(client.getSnapshot().edit.phase, 'idle');
-  assert.equal(client.getSnapshot().revision, 3);
-});
-
-test('SSEで処理済みの許可にHTTP応答が遅れても、編集中の下書きを維持する', () => {
-  const { client, grant, reply, snapshot } = setup();
-  grant();
-  client.updateDraft({ text: 'draft' });
-  snapshot(locked, 2);
-  reply('edit.granted', locked, 1, { lockId: 'lock-1' });
-  assert.equal(client.getSnapshot().status, 'ready');
-  assert.equal(client.getSnapshot().edit.draft.text, 'draft');
-});
-
-test('無応答によるロック解除通知で下書きを閉じ、再取得では再起動後のrevisionも受け入れる', () => {
-  const { client, grant, emit, snapshot } = setup();
-  grant();
-  emit({
-    type: 'edit.released', board, revision: 2, userId: identity.userId,
-    clientId: identity.clientId, cardId: card.cardId, lockId: 'lock-1', reason: 'timeout',
-  });
-  assert.equal(client.getSnapshot().edit.phase, 'idle');
-  assert.match(client.getSnapshot().error, /解除/);
-  client.disconnect();
-  client.connect();
-  snapshot(board, 0);
-  assert.equal(client.getSnapshot().status, 'ready');
-  assert.equal(client.getSnapshot().revision, 0);
-});
-
-test('通常確定・取消の完了より先に解除後のスナップショットが届いても成功を誤認しない', () => {
-  for (const operation of ['commitEdit', 'cancelEdit']) {
-    const { client, grant, snapshot, reply } = setup();
-    grant();
-    client[operation]();
-    snapshot(board, 2);
-    assert.equal(client.getSnapshot().edit.phase, operation === 'commitEdit' ? 'saving' : 'cancelling');
-    reply(operation === 'commitEdit' ? 'edit.committed' : 'edit.cancelled', board, 2);
-    assert.equal(client.getSnapshot().edit.phase, 'idle');
-    assert.equal(client.getSnapshot().error, null);
+test('許可応答が欠けても問い合わせから仮移動の確定・取消を回収できる', t => {
+  for (const cancel of [false, true]) {
+    const s = setup(t); const request = s.request(cid(1), 'transform');
+    s.client.updateDraft({ position: { x: 10, y: 20, z: 1 } });
+    if (cancel) s.client.cancelEdit(); else s.client.commitEdit();
+    const grant = s.service.executeCommand(request).body; s.emit(s.check(grant.lockId));
+    assert.equal(s.sent.at(-1).type, 'edit.check.reply'); assert.equal(s.sent.at(-1).state, cancel ? 'cancelling' : 'committing');
+    assert.equal(s.current().pendingCommands.some(command => command.requestId === request.requestId), false);
   }
+});
+test('リアクションと削除済み参照の更新を下書き・位置保存で巻き戻さない', t => {
+  const s = setup(t); s.acquire(cid(3));
+  s.client.updateDraft({ relatedIds: [cid(1), cid(2)] });
+  const other = commandFactory({ ...identity, clientId: 'other' });
+  s.service.executeCommand(other('reaction.add', { cardId: cid(3), reactionId: 'heart' }));
+  s.service.executeCommand(other('objects.delete', { objectIds: [cid(1)] })); s.emit(s.service.getBoardSnapshot('board'));
+  assert.deepEqual(s.draft(cid(3)).relatedIds, [cid(2)]);
+  s.client.commitEdit(); s.deliver();
+  assert.deepEqual(getCard(s.current().board, cid(3)).relatedIds, [cid(2)]);
+  assert.equal(getCard(s.current().board, cid(3)).reactions.length, 1);
+});
+test('生成状態の順序はrevisionと分離し、同revisionの未処理生成通知も案内へ渡す', t => {
+  const s = setup(t); const generated = { ...board(), cards: [...board().cards, word(4)] };
+  const running = { status: 'running', generationId: 'g2', level: 'high', source: 'manual' };
+  s.emit(snapshot(generated, 5, { generationSequence: 3, generation: running }));
+  const event = snapshot(generated, 5, { type: 'board.cards-generated', eventId: 'event', generationId: 'g1', generatedCardIds: [cid(4)], generationSequence: 2,
+    generation: { ...running, status: 'completed', generationId: 'g1' } });
+  s.emit(event); assert.equal(s.current().generation.generationId, 'g2'); assert.equal(s.current().generation.status, 'running');
+  assert.deepEqual(s.current().generatedCardIds, [cid(4)]);
+  s.client.dismissGuidance([cid(4)]); s.emit(event); assert.deepEqual(s.current().generatedCardIds, []);
+  s.emit(snapshot(board(), 6)); s.emit({ ...event, eventId: 'late' }); assert.deepEqual(s.current().generatedCardIds, []);
+});
+test('初期化前の通知を順序を保って反映し、初期取得に含まれる生成は案内しない', t => {
+  const s = setup(t); s.client.disconnect(); s.client.connect();
+  const generated = { ...board(), cards: [...board().cards, word(4)] };
+  s.emit(snapshot(generated, 2, { type: 'board.cards-generated', eventId: 'early', generationId: 'g', generatedCardIds: [cid(4)] }));
+  assert.equal(s.current().status, 'loading'); s.emit(snapshot(generated, 2));
+  assert.equal(s.current().status, 'ready'); assert.deepEqual(s.current().generatedCardIds, []);
+  s.client.disconnect(); s.client.connect();
+  s.emit(snapshot(generated, 3, { type: 'board.cards-generated', eventId: 'new', generationId: 'g2', generatedCardIds: [cid(4)] }));
+  s.emit(snapshot(board(), 2)); assert.equal(s.current().revision, 3); assert.deepEqual(s.current().generatedCardIds, [cid(4)]);
+});
+test('切断後は再同期し、古い接続・古い送信失敗・他ボードのイベントを無視する', async t => {
+  const s = setup(t); s.acquire(); const old = s.subscriptions.at(-1); const job = deferred();
+  s.transport.send = () => job.promise; s.client.commitEdit(); old.onDisconnect('offline');
+  assert.equal(s.current().status, 'offline'); assert.equal(s.current().edit.phase, 'idle');
+  s.transport.send = command => s.sent.push(command); s.client.connect();
+  old.onEvent(snapshot(board(), 999)); s.emit(snapshot(board(), 0));
+  job.reject(new Error('old')); await flush(); s.emit(snapshot({ ...board(), boardId: 'other' }, 100));
+  assert.equal(s.current().revision, 0); assert.equal(s.current().status, 'ready');
+});
+test('下書きからID・種類・リアクションを混入させず、不正座標を拒否する', t => {
+  const s = setup(t); s.acquire();
+  for (const patch of [{ cardId: cid(99) }, { reactions: [] }, { cardKind: 'block' }, { position: { x: NaN, y: 0, z: 0 } }]) {
+    assert.equal(s.client.updateDraft(patch), false);
+  }
+  assert.equal(s.current().edit.phase, 'editing');
 });

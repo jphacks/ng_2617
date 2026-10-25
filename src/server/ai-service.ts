@@ -1,19 +1,12 @@
-import type { Board } from '../domain/board';
+import type { Board, RelationLevel } from '../domain/board';
 
-/**
- * モックAIサービス：ダミーの単語を生成する
- * 実際のAI APIに置き換える際はここを差し替える
- */
-export async function generateWordSuggestions(board: Board): Promise<string[]> {
-  // モック実装：ダミーの単語を返す
-  const dummyWords = [
-    'コーヒー', '快適さ', '集客', 'メニュー', 'インテリア',
-    '音楽', 'Wi-Fi', '座席', 'スタッフ', '照明',
-    '値段', 'ブランド', '立地', 'オープン', '特産品'
-  ];
-  
-  // ランダムに3つの単語を選択
+/** モック生成。外部AIへ接続する場合もボードと関連性を受け取るこの窓口を使用する。 */
+export async function generateWordSuggestions(board: Board, level: RelationLevel): Promise<string[]> {
+  const pools: Record<RelationLevel, string[]> = {
+    low: ['宇宙旅行', '深海', 'オーケストラ', '季節の便り', '秘密基地', '冒険', '星座', 'タイムカプセル'],
+    mid: ['地域のつながり', '体験', '居心地', '発見', '習慣', '交流', '時間', '空間'],
+    high: ['利用シーン', '使いやすさ', '価値', '満足度', '改善', '目的', 'ニーズ', '課題解決'],
+  };
   const existing = new Set(board.cards.map(card => card.text.trim()));
-  const shuffled = dummyWords.filter(word => !existing.has(word)).sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, 3);
+  return pools[level].filter(word => !existing.has(word)).sort(() => Math.random() - 0.5).slice(0, 3);
 }

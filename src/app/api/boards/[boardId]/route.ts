@@ -1,5 +1,5 @@
 import { connection } from 'next/server';
-import { getBoardSnapshot, executeEdit } from '@/server/board-store';
+import { getBoardSnapshot, executeCommand, ensureBoard } from '@/server/board-store';
 
 export async function GET(
   _request: Request,
@@ -7,6 +7,7 @@ export async function GET(
 ) {
   await connection();
   const { boardId } = await params;
+  if (!ensureBoard(boardId)) return Response.json({ error: 'ボードIDが不正です。' }, { status: 400 });
   const snapshot = getBoardSnapshot(boardId);
   const headers = { 'Cache-Control': 'no-store' };
   if (!snapshot) {
@@ -30,6 +31,6 @@ export async function POST(
     return Response.json({ error: 'JSONが不正です。' }, { status: 400, headers });
   }
   const { boardId } = await params;
-  const result = executeEdit(command, boardId);
+  const result = executeCommand(command, boardId);
   return Response.json(result.body, { status: result.status, headers });
 }

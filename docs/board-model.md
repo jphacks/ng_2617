@@ -1,93 +1,30 @@
 # ボードの共通モデル
 
-`src/domain/board.ts` に、クライアントとサーバーの両方から使う型と操作を置く。
-React・Next.js・React Flow・データベースには依存しない。
-`'use client'` や `'use server'` は付けない。各実行環境から直接 import する。
-以下の型・使用例は現在の実装を示す。構造化IDやWordCard・BlockCardへの変更は、後述の統合計画であり未実装である。
+実装は `src/domain/board.ts`。フロント・サーバーとも同じ型を使用する。詳細と採用値は [implementation.md](./implementation.md) を参照。
 
-## データと操作
+| 型 | 内容 |
+| --- | --- |
+| BoardObjectId | `{ type: 'card' \| 'arrow', uuid: string }` |
+| CardId / ArrowId | 種別を限定したID。UUIDに接頭辞を付けない |
+| CardCommon | cardId、shape `{width,height}`、position `{x,y,z}`、color、font、text、任意のeditingUser |
+| WordCard | `cardKind: 'word'` と共通項目 |
+| BlockCard | `cardKind: 'block'` と共通項目、relatedIds、reactions |
+| CardReaction | `{ reactionId, userId }`。種類ごと・ユーザーごとに1件 |
+| Arrow | arrowId、sourceCardId、targetCardId、sourceAnchor、targetAnchor |
+| Anchor | north / east / south / west |
+| BoardTimer | 初期5分。停止中はremainingMs、実行中はendsAtを保持 |
+| Board | boardId、cards、arrows、timer |
 
-- `Board`：`boardId` とカードの配列。
-- `Card`：`cardId` と設計メモの6属性。
-- `User`：現時点では `userId` のみ。
-- `createBoard` / `getCard` / `addCard` / `replaceCard` / `removeCard`：生成・参照・追加・置換・削除。
+本文はどちらもtext。summaryや画面専用の送信用カード型は作らない。リアクションはBlockCard専用で、固定定義REACTIONSを共用する。
 
-クラスではなくプレーンなオブジェクトを使うため、JSONで送受信・保存できる。
-更新関数は元のボードを変更せず、新しいボードを返す。
-型はネストした座標・ユーザー・カード配列まで読み取り専用にしている。
-実行時の凍結やコピーは行わないため、呼び出し側も渡したデータを直接書き換えない。
-カードIDの重複と、存在しないカードの置換・削除はエラーにする。
+IDは `sameObjectId` で内容を比較する。React FlowやMap/Setには `objectKey` の `card:UUID` / `arrow:UUID` を使う。オブジェクト参照の一致に依存しない。
 
-```ts
-import { createBoard, addCard, replaceCard } from '@/domain/board';
+`createBoard`、`createEmptyCard`、`addCard`、`getCard`、`replaceCard`、`removeObjects`、`removeCard` は純粋操作。削除は参照と接続矢印も一括除去する。ロック・revision・配信はサーバー側の責務。
+`createSample` はカード・矢印・参照に新しいUUIDを発行する。`isEmpty` はカード枚数でなく、すべてのtext.trim()が空かを判定する。
 
-const emptyBoard = createBoard('board-1');
-const board = addCard(emptyBoard, {
-  cardId: 'card-1',
-  shape: 'rectangle',
-  position: { x: 250, y: 150, z: 0 },
-  color: '#ffffff',
-  text: 'カフェ',
-  font: 'sans-serif',
-});
+`src/domain/board-validation.ts` で種類、UUID形式、有限座標、寸法、一意性、参照、固定Reaction、矢印の接続規則を実行時検証する。関連付けは同じボード内のカードへの参照で、所有や階層ではない。自己参照・重複は禁止、循環は許可する。矢印は関連付けから独立し、自己接続と同一端点・同一Anchorの重複は禁止する。
 
-// サーバーから受け取った確定済みカードを適用する場合も同じ操作を使う。
-const nextBoard = replaceCard(board, {
-  ...board.cards[0],
-  text: '新しいカフェ',
-});
-```
-
-## 画面との接続
-
-現在のトップページはルームへの入口で、ルームページが `src/components/Board.tsx` を表示する。ボード画面の独自ノードと共有モデル・編集APIの統合は未完了である。
-現行の文字列 `cardId` はReact Flowの `id` に対応させられるが、統合計画の構造化IDでは共通の文字列化を通す。本文・位置・見た目は表示層でノードへ変換する。
-形状・色・フォント・描画順は表示側でノードの種類やスタイルに変換する。
-選択状態や表示範囲など、画面固有の情報は共通モデルに含めない。
-
-サーバーは編集権を確認し、変更を確定する際に共通の更新関数を利用できる。
-この関数をクライアントでも使えることは、サーバーの編集許可を代替しない。
-編集中の下書きはボードとは別に保持し、確定通知でボードを更新する。
-`editingUser` は編集者の表示情報であり、端末単位のロックを保証するものではない。
-ロック解除後のカードには `editingUser` を含めず、カード全体を置換する。
-
-## 今回の範囲と未決定事項
-
-取得・編集のサーバーとHTTP通信、取得画面への接続を追加済み。詳細は [board-server.md](./board-server.md) を参照。
-編集用UIと永続化はまだ実装していない。
-形状・色・フォントは暫定的に文字列として扱う。上の値は使用例であり、許容値の仕様ではない。
-`z` は保持するだけで、大小と前後の対応はまだ決めていない。
-`Board` 自体には更新番号を含めない。クライアント基盤では、暫定的に同期イベント側に
-ボード単位の `revision` を追加している。詳細は [board-client.md](./board-client.md) を参照。
-IDは呼び出し側で生成する。現在のHTTP通信層・サーバーには従来型の実行時検証があり、型の変更時に更新が必要となる。
-別のサーバー用プロジェクトへ分離するときは、このモジュールを共通パッケージへ移せる。
-
-## 統合後のモデルと操作の計画（未実装）
-
-型の詳細と合意・未確定事項は [frontend-merge-plan.md](./frontend-merge-plan.md) に集約する。
-
-- `BoardObjectId` はUUIDと種別の組とし、カード用・矢印用に絞る。比較・索引・React Flowへの文字列化を共通化し、オブジェクトの参照一致に依存しない。
-- WordCard・BlockCardを分け、本文は共通の `text` とする。BlockCardだけがカードへの参照とユーザーごとのリアクションを持つ。本文の下書きにはリアクションを含めない。
-- Reaction定義はアプリ共通の固定一覧を両側から参照し、ボードごとの複製や動的追加は行わない。
-- 同じBlockCardのreactionId・userIdの組を1件までとし、別の種類や別ユーザーの付与は許可する。取消は自分の付与だけとする。
-- 矢印はカード間の参照と独立したオブジェクトとし、端点カードと方角のAnchorを保持する。
-- 矢印は同一ボード内のカード間に限定し、自己接続・同じ端点と両Anchorの重複を禁止する。異なるAnchor・逆向き・循環は許可し、端点変更は削除再作成とする。
-- 単一・範囲・全消去では、削除対象、対象への参照、接続矢印を一括して更新する。BlockCardを消しても、その参照先カードは残す。
-- 複数移動は対象カード全体の位置を一括で更新する。単純な置換を繰り返した途中状態を、独立した確定更新として扱わない。
-- カード全体のリサイズはshapeを更新し、左辺・上辺の伸縮ではpositionも一体で更新する。外枠は共有shapeを基準とし、文字サイズの自動調整・内部スクロール・リアクション等の内容増加は表示側で扱う。
-- `isEmpty(board)` は全カードの `text.trim()` が空かで判定し、空カードしかない場合も生成を抑止する。カードの存在数の判定とは区別する。
-- Board.timerは初期5分停止の共有カウントダウン。停止中は残り時間、実行中は終了予定時刻を保持し、0秒で停止する。再開にはリセットが必要。サーバー現在時刻の補助情報はBoard本体と分ける。
-- 新規作成は空カードをロックなしで共有する。サンプル復元はカード・矢印を新IDで一括置換し、共有タイマーは保持する。
-
-純粋なモデル操作にロック・revision・待機タイマーを埋め込まない。サーバーのハンドラーが編集権や参照先を検証し、操作全体の変更後に影響ID一覧を `onBoardUpdated` へ渡す。
-更新種別により、共有タイマーは全体revision・配信だけを更新し、カード系更新だけが編集の最終更新情報・自動追加待機へ影響する。生成結果も最新Boardへ追加し、共有タイマーの状態を古い値へ戻さない。
-タイマー終了時の空フックonTimerFinishedはサーバーのライフサイクル側に置く。モデル操作に副作用を埋め込まない。
-移動中の仮位置、選択、表示範囲、生成カードへの画面外案内は画面側の状態とし、確定済みBoardへ混ぜない。
-リサイズ中の仮寸法も同様に分ける。サーバーの生成進行状態・generationIdの通知だけではBoardのrevisionを進めず、実際に生成カードが追加されたときに更新する。
-
-## 動作確認
-
-TypeScriptを直接実行できるNode.js（22.18以降）で以下を実行する。
+保存属性は `CardPatch`。kind、ID、editingUser、reactionsはパッチに含めない。位置だけの保存で他の属性を上書きしない。確定時は最新のリアクションを保持し、削除済みの関連先を除去する。
 
 ```sh
 node --test src/domain/board.test.mjs
