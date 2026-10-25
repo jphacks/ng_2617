@@ -24,7 +24,16 @@ test('2端末のHTTP＋SSEで複数編集・途中保存・自動解除・候補
   await clock.advance(30); await until(() => a.getSnapshot().board.cards.length === 4 && b.getSnapshot().board.cards.length === 4);
   assert.deepEqual(a.getSnapshot().generatedCardIds, b.getSnapshot().generatedCardIds);
   assert.equal(a.getSnapshot().generation.status, 'completed');
+  assert.equal(a.getSnapshot().generation.source, 'automatic');
+  assert.equal(b.getSnapshot().generation.source, 'automatic');
+  const eventId = a.getSnapshot().latestGenerationEvent?.eventId;
+  assert.ok(eventId); assert.deepEqual(b.getSnapshot().latestGenerationEvent, { eventId });
+  a.acknowledgeGenerationEvent(eventId); a.acknowledgeGenerationEvent(eventId);
+  assert.equal(a.getSnapshot().latestGenerationEvent, null);
+  assert.deepEqual(b.getSnapshot().latestGenerationEvent, { eventId });
+  b.acknowledgeGenerationEvent(eventId); assert.equal(b.getSnapshot().latestGenerationEvent, null);
   await clock.advance(1000); assert.equal(service.getBoardSnapshot('board').board.cards.length, 4);
+  assert.equal(a.getSnapshot().latestGenerationEvent, null); assert.equal(b.getSnapshot().latestGenerationEvent, null);
 });
 test('届かなかった確定・取消要求を期限確認から回収し、再送でも二重反映しない', async t => {
   for (const operation of ['commitEdit', 'cancelEdit']) {

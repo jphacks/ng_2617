@@ -12,7 +12,7 @@ import { newMatchingGame, newMatchingDraft, consumeSelected } from './matching-g
 
 export type EditResult = { status: number; body: BoardEvent | { error: string } };
 export type UpdateKind = 'edit-requested' | 'edit-committed' | 'edit-cancelled' | 'edit-saved' | 'edit-released' |
-  'card-created' | 'objects-deleted' | 'sample-restored' | 'reaction-changed' | 'arrow-created' | 'auto-generated' | 'board-imported' | 'timer' | 'matching';
+  'card-created' | 'objects-deleted' | 'sample-restored' | 'reaction-changed' | 'arrow-created' | 'auto-generated' | 'board-imported' | 'timer' | 'matching' | 'settings';
 export type BoardUpdate = Readonly<{ boardId: string; objectIds: readonly BoardObjectId[]; kind: UpdateKind; revision: number }>;
 type Lock = {
   cardIds: readonly CardId[]; userId: string; clientId: string; lockId: string; expiresAt: number; generation: number;
@@ -25,6 +25,8 @@ type Entry = {
   generation: GenerationState; generationSequence: number; generating?: string;
   timerVersion: number; cancelTimer?: () => void;
   cancelMatchingClose?: () => void;
+  // 設定変更は本文版数と分け、手動生成を巻き込まず古い自動生成だけを無効化する。
+  automaticVersion: number; additionNotBefore?: number; departed: Set<string>;
   results: Map<string, { fingerprint: string; result?: EditResult }>;
 };
 type Detail = BoardEvent extends infer E ? E extends BoardEvent ? Omit<E, keyof SnapshotData> : never : never;
@@ -57,9 +59,10 @@ export function createBoardService(initialBoards: readonly Board[], options: {
     if (!validBoard(board)) throw new Error('Invalid initial board');
     if (boards.has(board.boardId)) throw new Error('Duplicate board');
     const entry: Entry = {
-      board: { ...structuredClone(board), cards: board.cards.map(card => withoutEditor(structuredClone(card))) },
+      board: { ...structuredClone(board), settings: { autoGenerationEnabled: board.settings?.autoGenerationEnabled ?? true },
+        cards: board.cards.map(card => withoutEditor(structuredClone(card))) },
       revision: 0, locks: new Map(), cardLocks: new Map(), subscribers: new Set(), cardVersion: 0,
-      generation: { status: 'idle' }, generationSequence: 0, timerVersion: 0, results: new Map(),
+      generation: { status: 'idle' }, generationSequence: 0, timerVersion: 0, results: new Map(), automaticVersion: 0, departed: new Set(),
     };
     boards.set(board.boardId, entry);
     armTimer(entry);
@@ -122,19 +125,24 @@ export function createBoardService(initialBoards: readonly Board[], options: {
     }, lockTtlMs);
   }
   function waitForAddition(entry: Entry) {
-    if (disposed || entry.board.matching || entry.locks.size || !entry.lastUpdate || ['board-imported', 'matching'].includes(entry.lastUpdate.kind)) return;
+    if (disposed || !entry.board.settings.autoGenerationEnabled || entry.board.matching || entry.locks.size ||
+      (entry.additionNotBefore === undefined && (!entry.lastUpdate || ['board-imported', 'matching'].includes(entry.lastUpdate.kind)))) return;
     const version = entry.cardVersion;
+    const automaticVersion = entry.automaticVersion;
     entry.cancelAddition = schedule(() => {
-      if (disposed || entry.cardVersion !== version) return;
+      if (disposed || entry.cardVersion !== version || entry.automaticVersion !== automaticVersion) return;
       entry.cancelAddition = undefined;
-      if (entry.board.matching || entry.locks.size || isEmpty(entry.board) || (entry.lastUpdate?.kind === 'auto-generated' || entry.lastUpdate?.kind === 'board-imported' || entry.lastUpdate?.kind === 'matching') || entry.generating) return;
+      if (!entry.board.settings.autoGenerationEnabled || entry.board.matching || entry.locks.size || isEmpty(entry.board) ||
+        (entry.additionNotBefore === undefined && ['auto-generated', 'board-imported', 'matching'].includes(entry.lastUpdate?.kind ?? '')) || entry.generating) return;
+      entry.additionNotBefore = undefined;
       startGeneration(entry, 'mid', 'automatic');
-    }, Math.max(0, entry.lastUpdate.at + additionDelayMs - now()));
+    }, Math.max(0, (entry.additionNotBefore ?? entry.lastUpdate!.at + additionDelayMs) - now()));
   }
   function onBoardUpdated(entry: Entry, kind: UpdateKind, ids: readonly BoardObjectId[], detail?: Detail, userId?: string): BoardEvent {
     entry.revision++;
-    if (kind !== 'timer') {
+    if (kind !== 'timer' && kind !== 'settings') {
       entry.cardVersion++;
+      entry.additionNotBefore = undefined;
       entry.lastUpdate = { kind, at: now() };
       entry.cancelAddition?.(); entry.cancelAddition = undefined;
       waitForAddition(entry);
@@ -152,18 +160,21 @@ export function createBoardService(initialBoards: readonly Board[], options: {
   function startGeneration(entry: Entry, level: RelationLevel, source: 'manual' | 'automatic') {
     const generationId = crypto.randomUUID();
     const version = entry.cardVersion;
+    const automaticVersion = entry.automaticVersion;
     const input = structuredClone(entry.board);
     entry.cancelAddition?.(); entry.cancelAddition = undefined;
     entry.generating = generationId;
     setGeneration(entry, { status: 'running', generationId, level, source });
-    const current = () => !disposed && !entry.board.matching && entry.cardVersion === version && !entry.locks.size;
+    const current = () => !disposed && !entry.board.matching && entry.cardVersion === version && !entry.locks.size &&
+      (source === 'manual' || (entry.board.settings.autoGenerationEnabled && entry.automaticVersion === automaticVersion));
     // HTTPの受付を確定してから非同期の生成を進める。
     void Promise.resolve().then(async () => {
       try {
         const words = await generate(input, level);
         if (disposed) return;
         if (!current()) {
-          setGeneration(entry, { status: 'discarded', generationId, level, source, message: 'ボードが更新されたため、今回の候補は追加されませんでした。' });
+          setGeneration(entry, { status: 'discarded', generationId, level, source, message: source === 'automatic' && entry.automaticVersion !== automaticVersion
+            ? '自動生成の設定が変更されたため、今回の候補は追加されませんでした。' : 'ボードが更新されたため、今回の候補は追加されませんでした。' });
           return;
         }
         const cards = suggestionCards(entry.board, words, WORD_ADDITION_COUNT);
@@ -188,7 +199,8 @@ export function createBoardService(initialBoards: readonly Board[], options: {
       } finally {
         entry.generating = undefined;
         // 古い生成中に次の待機まで満了していた場合も、更新後の機会を取りこぼさない。
-        if (!disposed && entry.cardVersion !== version && entry.lastUpdate?.kind !== 'auto-generated' && !entry.cancelAddition) waitForAddition(entry);
+        if (!disposed && !entry.cancelAddition && (entry.additionNotBefore !== undefined ||
+          (entry.cardVersion !== version && entry.lastUpdate?.kind !== 'auto-generated'))) waitForAddition(entry);
       }
     });
     return generationId;
@@ -391,6 +403,7 @@ export function createBoardService(initialBoards: readonly Board[], options: {
   }
   function handleEdit(entry: Entry, command: EditCommand): EditResult {
     if (command.type === 'edit.request') {
+      if (entry.departed.has(JSON.stringify([command.userId, command.clientId]))) return reject(entry, command, 403, 'この接続は退室済みです。ルームに入り直してください。');
       const cards = command.cardIds.map(id => getCard(entry.board, id));
       if (cards.some(card => !card)) return reject(entry, command, 404, 'カードが見つかりません。');
       if (command.cardIds.some(id => entry.cardLocks.has(objectKey(id)))) return reject(entry, command, 409, '対象に編集中のカードがあります。');
@@ -443,6 +456,23 @@ export function createBoardService(initialBoards: readonly Board[], options: {
   }
   function handleImmediate(entry: Entry, command: Exclude<BoardCommand, EditCommand | { type: 'board.get' } | { type: `matching.${string}` }>): EditResult {
     switch (command.type) {
+      case 'board.leave': {
+        entry.departed.add(JSON.stringify([command.userId, command.clientId]));
+        const locks = [...entry.locks.values()].filter(lock => lock.userId === command.userId && lock.clientId === command.clientId);
+        for (const lock of locks) onLockReleased(entry, lock);
+        if (locks.length) onBoardUpdated(entry, 'edit-cancelled', locks.flatMap(lock => lock.cardIds));
+        return accepted(entry, command, locks.length > 0);
+      }
+      case 'board.settings.update': {
+        if (entry.board.settings.autoGenerationEnabled === command.autoGenerationEnabled) return accepted(entry, command);
+        entry.automaticVersion++;
+        entry.board = { ...entry.board, settings: { autoGenerationEnabled: command.autoGenerationEnabled } };
+        entry.cancelAddition?.(); entry.cancelAddition = undefined;
+        entry.additionNotBefore = command.autoGenerationEnabled ? now() + additionDelayMs : undefined;
+        if (command.autoGenerationEnabled) waitForAddition(entry);
+        onBoardUpdated(entry, 'settings', []);
+        return accepted(entry, command, true);
+      }
       case 'card.create': {
         const existing = getCard(entry.board, command.card.cardId);
         if (existing) return reject(entry, command, 409, '同じIDのカードが既に存在します。');
@@ -476,7 +506,7 @@ export function createBoardService(initialBoards: readonly Board[], options: {
         if (entry.locks.size) return reject(entry, command, 409, '編集中のカードがあるため、サンプルへ戻せません。');
         const sample = createSample(entry.board.boardId);
         const ids = [...entry.board.cards.map(c => c.cardId), ...entry.board.arrows.map(a => a.arrowId), ...sample.cards.map(c => c.cardId), ...sample.arrows.map(a => a.arrowId)];
-        entry.board = { ...sample, timer: entry.board.timer };
+        entry.board = { ...sample, timer: entry.board.timer, settings: entry.board.settings };
         onBoardUpdated(entry, 'sample-restored', ids);
         return accepted(entry, command, true);
       }
@@ -543,6 +573,7 @@ export function createBoardService(initialBoards: readonly Board[], options: {
     const retained: { fingerprint: string; result?: EditResult } = { fingerprint };
     entry.results.set(key, retained);
     const result = command.type === 'board.get' ? { status: 200, body: snapshot(entry) }
+      : command.type === 'board.leave' || command.type === 'board.settings.update' ? handleImmediate(entry, command)
       : command.type.startsWith('matching.') ? handleMatching(entry, command as Extract<BoardCommand, { type: `matching.${string}` }>)
       : entry.board.matching ? reject(entry, command, 409, '神経衰弱中は通常のボード操作とタイマー操作を利用できません。')
       : command.type.startsWith('edit.') ? handleEdit(entry, command as EditCommand)
@@ -554,6 +585,8 @@ export function createBoardService(initialBoards: readonly Board[], options: {
   return {
     supportsBoardImport: true,
     supportsMatching: true,
+    supportsBoardSettings: true,
+    supportsBoardLeave: true,
     getBoardSnapshot(boardId: string) { const entry = boards.get(boardId); return entry && !disposed ? snapshot(entry) : undefined; },
     ensureBoard(boardId: string) {
       if (disposed || !validId(boardId)) return false;

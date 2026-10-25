@@ -57,7 +57,8 @@ export function validArrow(v: unknown): v is Arrow {
 }
 export const arrowConnectionKey = (a: Arrow): string => JSON.stringify([objectKey(a.sourceCardId), objectKey(a.targetCardId), a.sourceAnchor, a.targetAnchor]);
 export function validBoard(v: unknown): v is Board {
-  if (!record(v) || !keys(v, ['boardId', 'cards', 'arrows', 'timer', 'matching']) || !validId(v.boardId) ||
+  if (!record(v) || !keys(v, ['boardId', 'cards', 'arrows', 'timer', 'matching', 'settings']) || !validId(v.boardId) ||
+      (v.settings !== undefined && (!record(v.settings) || !keys(v.settings, ['autoGenerationEnabled']) || typeof v.settings.autoGenerationEnabled !== 'boolean')) ||
       !Array.isArray(v.cards) || !v.cards.every(validCard) || !Array.isArray(v.arrows) || !v.arrows.every(validArrow) ||
       !record(v.timer) || v.timer.durationMs !== (v.matching ? MATCHING_DURATION_MS : TIMER_DURATION_MS)) return false;
   const ids = new Set(v.cards.map(card => objectKey(card.cardId)));
@@ -134,7 +135,7 @@ function validChanges(v: unknown): v is CardChange[] {
 }
 export const COMMAND_TYPES = [
   'board.get', 'edit.request', 'edit.commit', 'edit.cancel', 'edit.check.reply', 'card.create', 'objects.delete',
-  'board.clear', 'board.restore-sample', 'reaction.add', 'reaction.remove', 'arrow.create', 'arrow.delete',
+  'board.clear', 'board.restore-sample', 'board.settings.update', 'board.leave', 'reaction.add', 'reaction.remove', 'arrow.create', 'arrow.delete',
   'timer.start', 'timer.stop', 'timer.reset', 'generation.request', 'board.import',
   'matching.start', 'matching.select', 'matching.draft', 'matching.abort.request', 'matching.abort.confirm', 'matching.abort.cancel',
 ] as const;
@@ -151,7 +152,8 @@ export function validCommand(v: unknown): v is BoardCommand {
       text(v.text, 100_000) && typeof v.final === 'boolean';
     case 'matching.abort.request': return only('gameId') && validId(v.gameId);
     case 'matching.abort.confirm': case 'matching.abort.cancel': return only('gameId', 'confirmationId') && [v.gameId, v.confirmationId].every(validId);
-    case 'board.get': case 'board.clear': case 'board.restore-sample':
+    case 'board.settings.update': return only('autoGenerationEnabled') && typeof v.autoGenerationEnabled === 'boolean';
+    case 'board.get': case 'board.clear': case 'board.restore-sample': case 'board.leave':
     case 'timer.start': case 'timer.stop': case 'timer.reset': return only();
     case 'edit.request': return only('cardIds') && validIds(v.cardIds, 'card');
     case 'edit.commit': return only('lockId', 'changes') && validId(v.lockId) && validChanges(v.changes);

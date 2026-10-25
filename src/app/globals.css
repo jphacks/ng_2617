@@ -91,7 +91,7 @@ button { color: inherit; }
 .level-option b, .level-option small { display: block; }
 .level-option small { color: #858994; margin-top: 3px; font-size: 10px; }
 .generate-button { width: 100%; margin: 8px 0; }
-.generation-message { position: absolute; z-index: 12; right: 22px; bottom: 82px; max-width: min(340px, 80vw); padding: 9px 13px; font-size: 11px; color: #66748a; pointer-events: none; }
+.generation-message { position: absolute; z-index: 12; right: 22px; bottom: 82px; max-width: min(340px, 80vw); padding: 9px 13px; font-size: 11px; color: #66748a; }
 .ai-panel ~ .generation-message { bottom: 430px; }
 .generation-message.failed { color: #a74534; }
 .generation-message.running { animation: generation-pulse 1.5s ease-in-out infinite alternate; }
@@ -141,3 +141,10 @@ button { color: inherit; }
 .import-filename { overflow-wrap: anywhere; font-weight: 600; }
 .import-dialog-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 20px; }
 .import-dialog-actions > button:not(.primary) { border: 1px solid #ccd3dd; border-radius: 8px; background: white; padding: 9px 15px; }
+.board-notice { cursor: pointer; touch-action: manipulation; }
+.board-notice:focus-visible { outline: 2px solid #4778e6; outline-offset: 3px; }
+.board-settings .panel-title h2 { margin: 0; }
+.board-setting-toggle { display: flex; align-items: center; gap: 12px; margin-top: 24px; font-weight: 600; }
+.board-setting-toggle > span { flex: 1; }
+.board-setting-toggle input { width: 20px; height: 20px; accent-color: #4778e6; }
+.board-setting-toggle strong { min-width: 30px; color: #4778e6; }

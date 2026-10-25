@@ -127,7 +127,7 @@ export function BoardCard({ data: { card }, selected }: NodeProps<BoardNode>) {
           </button>;
         })}
       </div>}
-      {editing && <div className="card-edit-options nodrag">
+      {editing && <div className="card-edit-options nodrag nopan nowheel">
         <input type="color" value={/^#[0-9a-f]{6}$/i.test(card.color) ? card.color : '#ffffff'} aria-label="カードの色"
           onChange={event => client.updateDraft({ color: event.target.value }, card.cardId)} />
         <select aria-label="書体" value={card.font} onChange={event => client.updateDraft({ font: event.target.value }, card.cardId)}>

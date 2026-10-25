@@ -10,7 +10,15 @@ export function useBoardClient(client: BoardClient) {
   );
   useEffect(() => {
     client.connect();
-    return () => client.disconnect();
+    const leave = () => client.leave();
+    const resume = (event: PageTransitionEvent) => { if (event.persisted) client.connect(); };
+    window.addEventListener('pagehide', leave);
+    window.addEventListener('pageshow', resume);
+    return () => {
+      window.removeEventListener('pagehide', leave);
+      window.removeEventListener('pageshow', resume);
+      client.scheduleLeave();
+    };
   }, [client]);
   return { state, client };
 }
