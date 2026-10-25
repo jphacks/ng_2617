@@ -1,5 +1,7 @@
 'use client';
 
+import { randomUUID } from '@/domain/uuid';
+
 import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -15,7 +17,7 @@ export default function Home() {
       <input id="room-id" value={roomId} onChange={event => setRoomId(event.target.value)} maxLength={128} placeholder="例：my-room" required autoComplete="off" />
       <button type="submit" className="primary" disabled={!roomId.trim()}>ルームに参加</button>
     </form>
-    <button type="button" className="new-room" onClick={() => router.push(`/room/${crypto.randomUUID()}`)}>新しいルームを作る</button>
+    <button type="button" className="new-room" onClick={() => router.push(`/room/${randomUUID()}`)}>新しいルームを作る</button>
     <Link href="/room/demo">サンプルボードを開く ↗</Link>
     <small>同じルームIDを使うと、みんなで共同編集できます。</small>
   </section></main>;

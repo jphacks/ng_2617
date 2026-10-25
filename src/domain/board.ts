@@ -1,3 +1,5 @@
+import { randomUUID } from './uuid.ts';
+
 /** JSONで共有するモデル。選択・仮移動・表示範囲はここに保存しない。 */
 export type BoardObjectId = Readonly<{ type: 'card'; uuid: string }> | Readonly<{ type: 'arrow'; uuid: string }>;
 export type CardId = Extract<BoardObjectId, { type: 'card' }>;
@@ -48,8 +50,8 @@ export const REACTIONS: readonly Reaction[] = [
 
 export const objectKey = (id: BoardObjectId): string => `${id.type}:${id.uuid}`;
 export const sameObjectId = (a: BoardObjectId, b: BoardObjectId): boolean => a.type === b.type && a.uuid === b.uuid;
-export const newCardId = (): CardId => ({ type: 'card', uuid: crypto.randomUUID() });
-export const newArrowId = (): ArrowId => ({ type: 'arrow', uuid: crypto.randomUUID() });
+export const newCardId = (): CardId => ({ type: 'card', uuid: randomUUID() });
+export const newArrowId = (): ArrowId => ({ type: 'arrow', uuid: randomUUID() });
 
 export function createBoard(boardId: string): Board {
   return { boardId, cards: [], arrows: [], timer: { durationMs: TIMER_DURATION_MS, state: 'stopped', remainingMs: TIMER_DURATION_MS } };
