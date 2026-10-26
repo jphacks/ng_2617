@@ -14,7 +14,7 @@
 - matchingInput：ゲーム・手番・入力権トークンに対応する本人のローカル本文・連番・最終送信状態。ゲームの正本はboard.matching。
 - matchingNotice：通常ボードへ戻ったときの終了・追加件数の案内。
 
-公開メソッドは `connect` / `disconnect`、`requestEdit`、`updateDraft`、`commitEdit`、`cancelEdit`、`execute`、`updateMatchingDraft`、`retryPending`、`dismissGuidance`。
+公開メソッドは `connect` / `disconnect`、`leave` / `scheduleLeave`、`requestEdit`、`updateDraft`、`commitEdit`、`cancelEdit`、`execute`、`updateMatchingDraft`、`retryPending`、`dismissGuidance`。
 状態はreadonlyとして扱い、直接変更しない。受信値と送信コマンドはコピーする。
 
 ```ts
@@ -36,14 +36,15 @@ HTTP・SSEとも共通の実行時検証を通す。ボード、要求、端末�
 
 古いrevisionはボードを巻き戻さない。同じ／古いrevisionの個別要求への応答でも、対応する要求の完了は処理する。生成の順序はgenerationSequence、案内の重複はeventIdで判定する。初期化前の通知は順序を保って処理し、初期取得に含まれる生成は案内しない。
 
-HTTPの10秒タイムアウトや送信失敗ではSSE購読を解除せず、下書き・送信済み最終内容・元の要求を保持する。「元の要求を再送」は `retryPending` を使う。自動再送はしない。
+HTTPの10秒タイムアウトや送信失敗ではSSE購読を解除せず、下書き・送信済み最終内容・元の要求を保持する。通常操作は自動再送せず、「元の要求を再送」で `retryPending` を使う。例外として、結果不明の `board.import` はSSE再接続後の初期スナップショット受信時にも、同じ内容・requestIdで自動再送して結果を確認する。サーバーの重複実行防止により、成功済みの置き換えを再実行しない。
 SSE自体の切断ではofflineになり、通常編集の下書きを終了する。再接続では最新スナップショットを取り直し、案内対象も初期化する。古い接続の受信・送信失敗は無視する。
+明示的な退室では `leave` が `board.leave` をkeepaliveで送り、自端末の編集ロックを解除して通信を終了する。`scheduleLeave` はReactのeffect終了時の退室を予約し、StrictModeによる直後の再接続では予約を取り消す。一時的なSSE切断だけでは退室要求を送らず、残ったロックは期限確認で回収する。
 神経衰弱の本人の本文は切断中も保持する。再接続した時点でも同じゲーム・手番・入力権かつ期限内の場合に限り未送信本文を再共有する。期限時点で送信した最終本文は、同じ手番のclosing中なら再送できる。旧手番の本文を次の手番へ流用しない。最後の接続が失われたゲームは終了し、再接続で途中再開しない。
 
 ## 神経衰弱
 
 通常ボードの「神経衰弱をはじめる」から `matching.start` を送る。本文のある通常付箋が2枚未満、編集中のカードあり、送信・読み込み中では開始ボタンと理由を表示する。サーバーでも開始条件を検証する。
-`ConnectedBoard` が接続を所有し、共有状態に応じて `BoardCanvas` / `MatchingGame` を切り替える。ゲーム中は通常ツールを描画せず、通常編集と即時操作をクライアント・サーバーの双方で拒否する。
+`ConnectedBoard` が接続を所有し、共有状態に応じて `BoardCanvas` / `MatchingGame` を切り替える。ゲーム中は通常ツールを描画せず、通常編集・カードや矢印の即時操作・タイマー手動操作・AI生成・JSON読み込みをクライアント・サーバーの双方で拒否する。ボード設定の変更と退室はゲーム中も受け付ける。
 `updateMatchingDraft(text, final?)` は自分に割り当てられた入力カードだけを更新する。連番と入力権トークンで巻き戻しを防ぎ、本文の共有は残り時間・カーソル・他人のカード順序を変えない。0秒では通常編集を止め、`MatchingTextInput` がIMEを確定して最終本文を送信する。サーバーが追加を確定するまで「結果を反映中」を表示する。
 ゲーム終了時は成果物を通常ボードへ表示し、画面外案内にも追加する。ルールと最終送信の集約時間は [matching-game-ui.md](./matching-game-ui.md) を参照。
 
