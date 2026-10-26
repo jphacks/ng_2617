@@ -5,9 +5,9 @@
 言葉を持ち寄り、意外な組み合わせからアイデアを育てる、共同編集型のブレーンストーミングボードです。
 手が止まったときにはAIが発想の種となる言葉を追加し、神経衰弱モードではチーム全員で言葉を組み合わせてアイデアを考えます。
 
-**[アプリを試す](https://ya-sheng-e.onrender.com/) · [サンプルボードを開く](https://ya-sheng-e.onrender.com/room/demo) · [紹介動画を見る（準備中）](https://www.youtube.com/watch?v=piaNsc6ilBI)**
+**[アプリを試す](https://ya-sheng-e.onrender.com/) · [サンプルボードを開く](https://ya-sheng-e.onrender.com/room/demo) · [紹介動画を見る](https://youtu.be/9-Oa8TCKnBg)**
 
-[![「芽生え」の紹介動画](https://github.com/user-attachments/assets/2818d23d-36ea-49d7-a028-8ee4256c830c)](https://www.youtube.com/watch?v=piaNsc6ilBI)
+[![「芽生え」の紹介動画](https://github.com/user-attachments/assets/2818d23d-36ea-49d7-a028-8ee4256c830c)](https://youtu.be/9-Oa8TCKnBg)
 
 ## 製品概要
 
@@ -34,16 +34,16 @@
 
 #### 基本機能
 
-| 機能 | できること |
-| --- | --- |
-| ルームでの共同編集 | 同じルームの参加者に、カード・矢印・リアクション・タイマーの変更をリアルタイムに共有します。 |
-| 通常付箋 | 単語や気づきを自由に記入。色・書体・サイズの変更、複数選択での一括移動にも対応しています。 |
-| 関連カード・矢印 | 複数のカードを関連付けてアイデアをまとめ、矢印でカード同士のつながりを可視化できます。 |
-| リアクション | 関連カードに、👍・❤️・💡・🤔・🎉の5種類のリアクションをユーザーごとに付け外しできます。 |
-| AIによる候補語の生成 | Geminiが最大3つの新しい言葉を提案。手動生成では関連性を「低・中・高」から選べます。全員の手が止まったときの自動生成にも対応しています。 |
-| 神経衰弱モード | ボードの単語を裏向きのカードにし、選んだ2語から全員がアイデアを考えます。作ったアイデアは、元の2語に関連付けたカードとしてボードに残ります。 |
-| 共有タイマー | 5分のカウントダウンを共有し、開始・停止・リセットを全員の画面に反映します。 |
-| JSON保存・読み込み／SVG出力 | JSONでボードを保存して後から編集を再開したり、カードやつながりをSVGで出力して成果を共有したりできます。 |
+| 機能                        | できること                                                                                                                                   |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| ルームでの共同編集          | 同じルームの参加者に、カード・矢印・リアクション・タイマーの変更をリアルタイムに共有します。                                                 |
+| 通常付箋                    | 単語や気づきを自由に記入。色・書体・サイズの変更、複数選択での一括移動にも対応しています。                                                   |
+| 関連カード・矢印            | 複数のカードを関連付けてアイデアをまとめ、矢印でカード同士のつながりを可視化できます。                                                       |
+| リアクション                | 関連カードに、👍・❤️・💡・🤔・🎉の5種類のリアクションをユーザーごとに付け外しできます。                                                      |
+| AIによる候補語の生成        | Geminiが最大3つの新しい言葉を提案。手動生成では関連性を「低・中・高」から選べます。全員の手が止まったときの自動生成にも対応しています。      |
+| 神経衰弱モード              | ボードの単語を裏向きのカードにし、選んだ2語から全員がアイデアを考えます。作ったアイデアは、元の2語に関連付けたカードとしてボードに残ります。 |
+| 共有タイマー                | 5分のカウントダウンを共有し、開始・停止・リセットを全員の画面に反映します。                                                                  |
+| JSON保存・読み込み／SVG出力 | JSONでボードを保存して後から編集を再開したり、カードやつながりをSVGで出力して成果を共有したりできます。                                      |
 
 #### 使い方
 
@@ -133,15 +133,15 @@ JSONにはカードとつながりを保存し、編集権や通信状態など�
 
 ### 活用した技術
 
-| 技術 | 用途 |
-| --- | --- |
-| Next.js 16（App Router）・React 19 | ルーム画面、共有ボード、ゲーム画面、HTTP APIの実装 |
-| TypeScript | カード・矢印・編集操作・ゲーム状態を共通の型で定義 |
-| React Flow（`@xyflow/react`） | カードの配置・移動・リサイズ、矢印、ズーム・パン |
+| 技術                               | 用途                                                       |
+| ---------------------------------- | ---------------------------------------------------------- |
+| Next.js 16（App Router）・React 19 | ルーム画面、共有ボード、ゲーム画面、HTTP APIの実装         |
+| TypeScript                         | カード・矢印・編集操作・ゲーム状態を共通の型で定義         |
+| React Flow（`@xyflow/react`）      | カードの配置・移動・リサイズ、矢印、ズーム・パン           |
 | Node.js・Server-Sent Events（SSE） | サーバー側の状態・期限管理と、ボード更新のリアルタイム配信 |
-| Gemini API | カード本文を基にした、関連性別の候補語生成 |
-| CSS | ボードとゲーム画面のスタイリング、竜巻の演出 |
-| Node.js標準テストランナー・jsdom | 共同編集、通信、ゲーム進行、入力、保存・読み込みの検証 |
+| Gemini API                         | カード本文を基にした、関連性別の候補語生成                 |
+| CSS                                | ボードとゲーム画面のスタイリング、竜巻の演出               |
+| Node.js標準テストランナー・jsdom   | 共同編集、通信、ゲーム進行、入力、保存・読み込みの検証     |
 
 利用デバイスはWebブラウザです。PCでのマウス・キーボード操作に加え、タッチ端末での入力にも配慮しています。
 
@@ -149,16 +149,16 @@ JSONにはカードとつながりを保存し、編集権や通信状態など�
 
 #### ハッカソンで開発した独自機能・技術
 
-| 注力した実装 | 主なコード |
-| --- | --- |
-| 通常付箋・関連カード・矢印をつなぐ共通モデル | [board.ts](./src/domain/board.ts) |
-| 編集権、期限確認、要求IDによる二重実行防止、自動生成の起動条件 | [board-service.ts](./src/server/board-service.ts)・[edit-lifecycle.ts](./src/server/edit-lifecycle.ts) |
-| 手動・自動で共通のGemini連携、候補語の検証・重複除去 | [ai-service.ts](./src/server/ai-service.ts)・[AIapi.ts](./src/server/AIapi.ts) |
-| HTTP操作とSSE配信、確定状態・下書き・再送の管理 | [http-board-transport.ts](./src/client/http-board-transport.ts)・[board-client.ts](./src/client/board-client.ts) |
-| 神経衰弱の状態管理、単語の補充、アイデアの関連カード化 | [matching-game.ts](./src/server/matching-game.ts)・[MatchingGame.tsx](./src/components/MatchingGame.tsx) |
-| 日本語変換中の入力保護、タッチ端末のフォーカス管理 | [CardTextInput.ts](./src/components/CardTextInput.ts)・[MatchingTextInput.ts](./src/components/MatchingTextInput.ts)・[focus-text-input.ts](./src/client/focus-text-input.ts) |
-| JSON保存・読み込みと、ボード全体のSVG出力 | [board-file.ts](./src/client/board-file.ts)・[board-svg.ts](./src/client/board-svg.ts) |
-| 候補追加時の演出と、画面外のカードへの案内 | [StormAnimation.tsx](./src/components/StormAnimation.tsx)・[generated-guidance.ts](./src/client/generated-guidance.ts) |
+| 注力した実装                                                   | 主なコード                                                                                                                                                                    |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 通常付箋・関連カード・矢印をつなぐ共通モデル                   | [board.ts](./src/domain/board.ts)                                                                                                                                             |
+| 編集権、期限確認、要求IDによる二重実行防止、自動生成の起動条件 | [board-service.ts](./src/server/board-service.ts)・[edit-lifecycle.ts](./src/server/edit-lifecycle.ts)                                                                        |
+| 手動・自動で共通のGemini連携、候補語の検証・重複除去           | [ai-service.ts](./src/server/ai-service.ts)・[AIapi.ts](./src/server/AIapi.ts)                                                                                                |
+| HTTP操作とSSE配信、確定状態・下書き・再送の管理                | [http-board-transport.ts](./src/client/http-board-transport.ts)・[board-client.ts](./src/client/board-client.ts)                                                              |
+| 神経衰弱の状態管理、単語の補充、アイデアの関連カード化         | [matching-game.ts](./src/server/matching-game.ts)・[MatchingGame.tsx](./src/components/MatchingGame.tsx)                                                                      |
+| 日本語変換中の入力保護、タッチ端末のフォーカス管理             | [CardTextInput.ts](./src/components/CardTextInput.ts)・[MatchingTextInput.ts](./src/components/MatchingTextInput.ts)・[focus-text-input.ts](./src/client/focus-text-input.ts) |
+| JSON保存・読み込みと、ボード全体のSVG出力                      | [board-file.ts](./src/client/board-file.ts)・[board-svg.ts](./src/client/board-svg.ts)                                                                                        |
+| 候補追加時の演出と、画面外のカードへの案内                     | [StormAnimation.tsx](./src/components/StormAnimation.tsx)・[generated-guidance.ts](./src/client/generated-guidance.ts)                                                        |
 
 タイマーや通信をテスト用に差し替え、同時編集、古い応答、切断・再接続、ゲームの時間切れ、日本語変換中の入力など、共同作業で起きやすいケースを検証しています。
 実装・仕様・開発手順は[実装ドキュメントの目次](./docs/index.md)にまとめています。各文書の内容と読む順序を確認できます。
