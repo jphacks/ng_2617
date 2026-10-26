@@ -161,7 +161,7 @@ JSONにはカードとつながりを保存し、編集権や通信状態など�
 | 候補追加時の演出と、画面外のカードへの案内 | [StormAnimation.tsx](./src/components/StormAnimation.tsx)・[generated-guidance.ts](./src/client/generated-guidance.ts) |
 
 タイマーや通信をテスト用に差し替え、同時編集、古い応答、切断・再接続、ゲームの時間切れ、日本語変換中の入力など、共同作業で起きやすいケースを検証しています。
-詳しい実装状況は[実装ドキュメント](./docs/implementation.md)、ゲームの仕様は[神経衰弱の仕様](./docs/matching-game-ui.md)にまとめています。
+実装・仕様・開発手順は[実装ドキュメントの目次](./docs/index.md)にまとめています。各文書の内容と読む順序を確認できます。
 
 ## 開発環境
 
